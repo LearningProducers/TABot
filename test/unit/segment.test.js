@@ -467,3 +467,120 @@ test('synth is deterministic per seed and layoutGrid keeps slips apart', () => {
   assert.throws(() => synth.layoutGrid(0), RangeError);
   assert.throws(() => synth.layoutGrid(11), RangeError);
 });
+
+// ---- full pages, and pages resting on other white pages -----------------
+
+// A phone photo, portrait 3:4, the way a teacher shoots a full page.
+const PORTRAIT = { width: 1500, height: 2000 };
+
+// A rect contains another when every corner of the inner one lies inside the
+// outer one, give or take tol px.
+function contains(outer, inner, tol) {
+  const c = Math.cos(outer.angle), s = Math.sin(outer.angle);
+  return seg.corners(inner).every(([x, y]) => {
+    const dx = x - outer.cx, dy = y - outer.cy;
+    const u = dx * c + dy * s, v = -dx * s + dy * c;
+    return Math.abs(u) <= outer.w / 2 + tol && Math.abs(v) <= outer.h / 2 + tol;
+  });
+}
+
+// A reported phone photo that found no slips, rebuilt: one full-page quiz (a circled
+// multiple choice and two multiplications worked in printed grids) filling
+// nearly the frame, resting on a stack of white pages, a thin dark edge of
+// table showing on one side, the soft shadow of the top page on the stack.
+function quizOnStack(seed) {
+  return synth.makePhoto(Object.assign({ seed }, PORTRAIT, {
+    under: [{ cx: 700, cy: 1000, w: 1510, h: 2120 }, { cx: 690, cy: 990, w: 1500, h: 2100, angleDeg: -1 }],
+    slips: [{ cx: 735, cy: 1010, w: 1400, h: 1812, angleDeg: 1.5, kind: 'quiz', shadow: 14 }]
+  }));
+}
+
+test('the reported photo: a full-page quiz on a white stack is read as one paper holding the whole quiz', () => {
+  for (const seed of [11, 21, 31]) {
+    const { raster, truth } = quizOnStack(seed);
+    for (const { gray, label } of bothSizes(raster)) {
+      const k = gray.width / PORTRAIT.width;
+      const out = seg.findSlipsDetailed(gray);
+      assert.equal(out.slips.length, 1, `seed ${seed}, ${label}: one paper`);
+      assert.equal(out.slips[0].suspect, null, `seed ${seed}, ${label}: not suspect`);
+      assert.ok(contains(out.slips[0], scaleRect(truth[0], k), 2), `seed ${seed}, ${label}: the whole quiz is in the crop`);
+    }
+  }
+});
+
+test('the reported photo failed before this change: a 0.6 area cap finds nothing in it', () => {
+  const { raster } = quizOnStack(11);
+  const gray = seg.toGray(synth.downscale(raster, 1000));
+  assert.deepEqual(seg.findSlipsDetailed(gray, { maxAreaFrac: 0.6, wholeBrightFrac: 2 }), { slips: [], warnings: ['none'] });
+});
+
+test('a page filling most of the frame on a dark surface is found tight', () => {
+  for (const [seed, deg] of [[12, -2], [13, 0], [14, 3]]) {
+    const { raster, truth } = synth.makePhoto(Object.assign({ seed }, PORTRAIT, {
+      slips: [{ cx: 750, cy: 1000, w: 1290, h: 1670, angleDeg: deg, kind: 'quiz' }]
+    }));
+    for (const { gray, label } of bothSizes(raster)) {
+      const out = seg.findSlipsDetailed(gray);
+      assertClean(out, `seed ${seed}, ${label}`);
+      assertMatches(out.slips, [scaleRect(truth[0], gray.width / PORTRAIT.width)], gray.width);
+    }
+  }
+});
+
+test('a page cut off by the frame on two sides is one paper and never suspect', () => {
+  const { raster } = synth.makePhoto(Object.assign({ seed: 15 }, PORTRAIT, {
+    slips: [{ cx: 820, cy: 1080, w: 1500, h: 1940, angleDeg: 4, kind: 'quiz' }]
+  }));
+  const gray = seg.toGray(synth.downscale(raster, 1000));
+  const out = seg.findSlipsDetailed(gray);
+  assertClean(out, 'cut-off page');
+  assert.equal(out.slips.length, 1);
+  assert.ok(Math.hypot(out.slips[0].cx - 410, out.slips[0].cy - 540) < 0.1 * gray.height, 'centered on the visible page');
+});
+
+test('the edge of a page peeking in at the photo edge is dropped; the quiz is kept', () => {
+  const { raster, truth } = synth.makePhoto(Object.assign({ seed: 16 }, PORTRAIT, {
+    under: [{ cx: 750, cy: 2050, w: 1400, h: 200 }],
+    slips: [{ cx: 750, cy: 930, w: 1200, h: 1560, angleDeg: 1, kind: 'quiz' }]
+  }));
+  for (const { gray, label } of bothSizes(raster)) {
+    const out = seg.findSlipsDetailed(gray);
+    assertClean(out, label);
+    assertMatches(out.slips, [scaleRect(truth[0], gray.width / PORTRAIT.width)], gray.width);
+  }
+});
+
+test('two full pages side by side on a dark surface are two papers, left to right', () => {
+  const { raster, truth } = synth.makePhoto({ seed: 17, width: 2000, height: 1500, slips: [
+    { cx: 520, cy: 760, w: 860, h: 1110, angleDeg: -3, kind: 'quiz' },
+    { cx: 1480, cy: 740, w: 860, h: 1110, angleDeg: 2, kind: 'quiz' }
+  ] });
+  for (const { gray, label } of bothSizes(raster)) {
+    const out = seg.findSlipsDetailed(gray);
+    assertClean(out, label);
+    assertMatches(out.slips, truth.map((t) => scaleRect(t, gray.width / 2000)), gray.width);
+  }
+});
+
+test('a bright photo with no paper edges to find is read whole, with the whole warning', () => {
+  const pale = { width: 80, height: 60, data: new Uint8Array(80 * 60).fill(220) };
+  const out = seg.findSlipsDetailed(pale);
+  assert.deepEqual(out.warnings, ['whole']);
+  assert.deepEqual(out.slips, [{ cx: 40, cy: 30, w: 80, h: 60, angle: 0, suspect: null, whole: true }]);
+  assert.deepEqual(seg.wholeFrame(80, 60), out.slips[0]);
+  // A stack of white pages filling the frame with no surface showing, and
+  // one page on it: one paper, the whole photo or nearly.
+  const { raster } = synth.makePhoto(Object.assign({ seed: 18 }, PORTRAIT, {
+    under: [{ cx: 750, cy: 1000, w: 1700, h: 2200 }],
+    slips: [{ cx: 750, cy: 1000, w: 1400, h: 1812, kind: 'quiz', shadow: 10 }]
+  }));
+  const gray = seg.toGray(synth.downscale(raster, 1000));
+  const found = seg.findSlipsDetailed(gray);
+  assert.equal(found.slips.length, 1);
+  assert.ok(found.slips[0].w * found.slips[0].h > 0.9 * gray.width * gray.height, 'the whole photo');
+});
+
+test('a dark photo with no paper in it still finds nothing', () => {
+  const dim = { width: 80, height: 60, data: new Uint8Array(80 * 60).fill(90) };
+  assert.deepEqual(seg.findSlipsDetailed(dim), { slips: [], warnings: ['none'] });
+});

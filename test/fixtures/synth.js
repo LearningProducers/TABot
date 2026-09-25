@@ -199,7 +199,79 @@
     return { paths: paths, half: half, ink: pick(rnd, INKS) };
   }
 
-  function paintSlip(raster, rnd, light, slip, heavy) {
+  // A full-page quiz in local coordinates: a printed question line over each
+  // of three blocks; a multiple choice with four printed options and one
+  // circled in ink; two multiplications, each a printed grid with digit-like
+  // ink marks in its cells. Printed parts are returned as segments to draw in
+  // PRINT, handwritten parts in ink.
+  function quizPage(rnd, slip) {
+    var w = slip.w, h = slip.h, m = 0.07 * Math.min(w, h);
+    var left = -w / 2 + m, right = w / 2 - m, top = -h / 2 + m + 0.15 * h, bottom = h / 2 - m;
+    var blockH = (bottom - top) / 3, printed = [], inked = [];
+    var printHalf = Math.max(0.6, 0.0015 * h), inkHalf = Math.max(1, 0.003 * h);
+
+    for (var b = 0; b < 3; b++) {
+      var y0 = top + b * blockH, textV = y0 + 0.08 * blockH;
+      var u = left, stop = left + (0.5 + rnd() * 0.3) * (right - left);
+      while (u < stop) {
+        var len = (0.04 + rnd() * 0.08) * w;
+        printed.push([[u, textV], [Math.min(u + len, stop), textV]]);
+        u += len + 0.02 * w;
+      }
+      if (b === 0) {
+        var chosen = Math.floor(rnd() * 4);
+        for (var k = 0; k < 4; k++) {
+          var ou = left + 0.05 * w, ov = y0 + (0.25 + 0.17 * k) * blockH;
+          printed.push([[ou, ov], [ou + 0.12 * w, ov]]);
+          if (k === chosen) {
+            var ring = loop(rnd, ou + 0.06 * w, ov, 0.09 * w, 0.06 * blockH);
+            for (var r = 0; r < ring.length; r++) inked.push([ring[r], ring[(r + 1) % ring.length]]);
+          }
+        }
+        continue;
+      }
+      var cols = 5, rows = 5, cell = Math.min(0.06 * w, 0.75 * blockH / rows);
+      var gu = left + 0.1 * w, gv = y0 + 0.2 * blockH;
+      for (var c = 0; c <= cols; c++) printed.push([[gu + c * cell, gv], [gu + c * cell, gv + rows * cell]]);
+      for (var rr = 0; rr <= rows; rr++) printed.push([[gu, gv + rr * cell], [gu + cols * cell, gv + rr * cell]]);
+      for (var ry = 0; ry < rows; ry++) {
+        for (var cx = 0; cx < cols; cx++) {
+          if (rnd() < 0.3) continue;
+          var mu = gu + (cx + 0.5) * cell, mv = gv + (ry + 0.5) * cell, a = 0.3 * cell;
+          inked.push([[mu - a * 0.6, mv - a], [mu + a * 0.6, mv - a * 0.2]]);
+          inked.push([[mu + a * 0.6, mv - a * 0.2], [mu - a * 0.4, mv + a]]);
+        }
+      }
+    }
+    return { printed: printed, printHalf: printHalf, inked: inked, inkHalf: inkHalf };
+  }
+
+  // Darkens the surface in a band outside a rect, the soft shadow a top page
+  // casts on the pages under it: strength at the edge, fading to nothing at
+  // width px.
+  function paintShadow(raster, slip, width, strength) {
+    var W = raster.width, H = raster.height, d = raster.data;
+    var cos = Math.cos(slip.angle), sin = Math.sin(slip.angle);
+    var halfW = slip.w / 2, halfH = slip.h / 2;
+    var ex = halfW * Math.abs(cos) + halfH * Math.abs(sin) + width + 2;
+    var ey = halfW * Math.abs(sin) + halfH * Math.abs(cos) + width + 2;
+    var x0 = Math.max(0, Math.floor(slip.cx - ex)), x1 = Math.min(W - 1, Math.ceil(slip.cx + ex));
+    var y0 = Math.max(0, Math.floor(slip.cy - ey)), y1 = Math.min(H - 1, Math.ceil(slip.cy + ey));
+    for (var y = y0; y <= y1; y++) {
+      for (var x = x0; x <= x1; x++) {
+        var dx = x + 0.5 - slip.cx, dy = y + 0.5 - slip.cy;
+        var u = Math.abs(dx * cos + dy * sin) - halfW, v = Math.abs(-dx * sin + dy * cos) - halfH;
+        var out = Math.sqrt(Math.max(0, u) * Math.max(0, u) + Math.max(0, v) * Math.max(0, v));
+        if (out <= 0 || out >= width) continue;
+        var k = 1 - strength * (1 - out / width), i = (y * W + x) * 4;
+        d[i] *= k;
+        d[i + 1] *= k;
+        d[i + 2] *= k;
+      }
+    }
+  }
+
+  function paintSlip(raster, rnd, light, slip, heavy, kind) {
     var W = raster.width, H = raster.height, d = raster.data;
     var cos = Math.cos(slip.angle), sin = Math.sin(slip.angle);
     var halfW = slip.w / 2, halfH = slip.h / 2;
@@ -226,11 +298,25 @@
       }
     }
 
+    function toImage(p) {
+      return [slip.cx + p[0] * cos - p[1] * sin, slip.cy + p[0] * sin + p[1] * cos];
+    }
+    if (kind === 'blank') return;
+    if (kind === 'quiz') {
+      var quiz = quizPage(rnd, slip), pen = pick(rnd, INKS);
+      quiz.printed.forEach(function (sg) {
+        var a = toImage(sg[0]), b = toImage(sg[1]);
+        drawSegment(raster, a[0], a[1], b[0], b[1], quiz.printHalf, PRINT);
+      });
+      quiz.inked.forEach(function (sg) {
+        var a = toImage(sg[0]), b = toImage(sg[1]);
+        drawSegment(raster, a[0], a[1], b[0], b[1], quiz.inkHalf, pen);
+      });
+      return;
+    }
     var ink = handwriting(rnd, slip, heavy);
     ink.paths.forEach(function (path) {
-      var pts = path.points.map(function (p) {
-        return [slip.cx + p[0] * cos - p[1] * sin, slip.cy + p[0] * sin + p[1] * cos];
-      });
+      var pts = path.points.map(toImage);
       var last = path.closed ? pts.length : pts.length - 1;
       for (var k = 0; k < last; k++) {
         var a = pts[k], b = pts[(k + 1) % pts.length];
@@ -239,9 +325,15 @@
     });
   }
 
-  // slips: [{cx, cy, w, h, angleDeg, heavy}] in pixels; heavy (optional)
-  // draws heavy handwriting on that slip. Later slips paint over earlier ones.
-  // truth keeps the input order, angle in radians.
+  // slips: [{cx, cy, w, h, angleDeg, heavy, kind, shadow}] in pixels; heavy
+  // (optional) draws heavy handwriting on that slip; kind 'quiz' draws a
+  // full-page quiz instead (see quizPage), kind 'blank' paper with no handwriting; shadow
+  // (px, optional) casts a soft shadow round it on whatever lies below.
+  // Later slips paint over earlier ones.
+  // under: [{cx, cy, w, h, angleDeg}] blank pages painted first, with no
+  // shadow and no ink: a stack of white pages the slips rest on. They are not
+  // in truth.
+  // truth keeps the input order of slips, angle in radians.
   function makePhoto(opts) {
     opts = opts || {};
     var seed = opts.seed === undefined ? 1 : opts.seed;
@@ -251,9 +343,16 @@
     var light = lighting(rnd, width, height);
     paintSurface(raster, rnd, light, pick(rnd, SURFACES));
 
+    function rect(s) {
+      return { cx: s.cx, cy: s.cy, w: s.w, h: s.h, angle: (s.angleDeg || 0) * Math.PI / 180 };
+    }
+    (opts.under || []).forEach(function (s) {
+      paintSlip(raster, rnd, light, rect(s), false, 'blank');
+    });
     var truth = (opts.slips || []).map(function (s) {
-      var slip = { cx: s.cx, cy: s.cy, w: s.w, h: s.h, angle: (s.angleDeg || 0) * Math.PI / 180 };
-      paintSlip(raster, rnd, light, slip, !!s.heavy);
+      var slip = rect(s);
+      if (s.shadow) paintShadow(raster, slip, s.shadow, 0.3);
+      paintSlip(raster, rnd, light, slip, !!s.heavy, s.kind);
       return slip;
     });
     return { raster: raster, truth: truth };
