@@ -682,7 +682,8 @@
 
     // The count shows before anything is read, so the teacher can hold it
     // against the stack.
-    var found = 'Found ' + plural(cut.crops.length, 'slip', 'slips') + '.';
+    var found = cut.whole ? 'No paper edges found, so the whole photo is read as one paper.'
+      : 'Found ' + plural(cut.crops.length, 'slip', 'slips') + '.';
     setText(el.photoFound, found);
     var concern = slipConcern(cut.slips);
     if (concern) {
@@ -772,11 +773,13 @@
   }
 
   // Decode, find the slips, cut one upright JPEG per slip plus its enhanced
-  // copy. The chosen file is let go as soon as it is decoded, before the
-  // slips are looked for. Crops are drawn straight from the decoded photo at
-  // full resolution; the decoded photo is released after the last crop, and
-  // every canvas before this returns. -> {crops, slips} with slips from
-  // segment.js.
+  // copy. A mostly bright photo with no paper edges to find is one paper,
+  // the whole photo (segment.js's 'whole' warning). The chosen file is let
+  // go as soon as it is decoded, before the slips are looked for. Crops are
+  // drawn straight from the decoded photo at full resolution; the decoded
+  // photo is released after the last crop, and every canvas before this
+  // returns. -> {crops, slips, whole} with slips from segment.js, whole true
+  // when the photo is read whole.
   async function cutPhoto(chosen) {
     var photo;
     try {
@@ -795,11 +798,12 @@
       }
       if (!found.slips.length) throw problem('No slips found in this photo.', CAPTURE_TIPS);
 
+      // A photo read whole is cut at its own edges, with no pad of surface.
       var scale = photo.width / analysisWidth;
       var crops = found.slips.map(function (slip) {
-        return cutCrop(photo.image, T.segment.cropPlan(slip, scale, { pad: CROP_PAD }));
+        return cutCrop(photo.image, T.segment.cropPlan(slip, scale, { pad: slip.whole ? 0 : CROP_PAD }));
       });
-      return { crops: crops, slips: found.slips };
+      return { crops: crops, slips: found.slips, whole: found.warnings.indexOf('whole') >= 0 };
     } finally {
       photo.release();
     }

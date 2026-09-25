@@ -1281,6 +1281,46 @@ test('a much larger slip is asked about, and crops come from the full photo', as
   expectCleanRun(mock, seen);
 });
 
+// A full page on a white stack (the photo that once found no slips) and a
+// pale photo with no edges to find: each is read as exactly one paper.
+function pagePhotos() {
+  const size = { width: 1500, height: 2000 };
+  const stack = synth.makePhoto(Object.assign({ seed: 11 }, size, {
+    under: [{ cx: 700, cy: 1000, w: 1510, h: 2120 }, { cx: 690, cy: 990, w: 1500, h: 2100, angleDeg: -1 }],
+    slips: [{ cx: 735, cy: 1010, w: 1400, h: 1812, angleDeg: 1.5, kind: 'quiz', shadow: 14 }]
+  }));
+  const pale = synth.makeRaster(1200, 1600);
+  for (let i = 0; i < pale.data.length; i += 4) pale.data[i] = pale.data[i + 1] = pale.data[i + 2] = 226;
+  return { stack: encodePng(stack.raster), pale: encodePng(pale) };
+}
+
+test('a full page on a white stack, and a photo with no edges, are each read as one paper', async ({ page, context }) => {
+  const photos = pagePhotos();
+  const mock = createGroqMock((crop, model) => readingReply(model, STUDENTS[0], crop.pass));
+  const seen = await guard(page, context, mock);
+  await page.goto('/index.html');
+  await setUp(page, ANSWER_KEY);
+
+  await sendPhoto(page, 'quiz-on-stack.png', photos.stack);
+  await expect(page.locator('#photo-found')).toHaveText('Found 1 slip.');
+  await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
+  await expect(page.locator('#photo-error')).toBeHidden();
+  await expect(page.locator('#results td.student')).toHaveText([STUDENTS[0].name]);
+
+  await sendPhoto(page, 'pale.png', photos.pale);
+  await expect(page.locator('#photo-found')).toHaveText('No paper edges found, so the whole photo is read as one paper.');
+  await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
+  await expect(page.locator('#results td.student')).toHaveText([STUDENTS[0].name, STUDENTS[0].name]);
+
+  // The whole photo reaches the model uncut: 1200 x 1600 scaled to the
+  // 1280 px limit, with no pad of surface round it.
+  const whole = mock.cropList.filter((c) => c.pass === 'reader')[1];
+  expect(jpegSize(whole.dataUrl)).toEqual({ width: 960, height: 1280 });
+
+  await expectKeysOnlyInAuthorization(mock, seen, [KEY]);
+  expectCleanRun(mock, seen);
+});
+
 // ---------------------------------------------------------------- tests 5 to 7
 
 test('with site data blocked, the session still works and says nothing is kept', async ({ page, context }) => {

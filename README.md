@@ -24,15 +24,18 @@ been tested in WebKit with an iPhone profile and in desktop Chromium.
 3. **Photos.** Lay 5 to 10 slips flat on a dark or colored surface, well lit,
    not overlapping, with a gap between them, every slip fully in frame, and
    shoot straight down. On a phone, Take photo opens the camera directly (no
-   permission prompt); Upload photo takes a file on any device. The page finds
-   each slip and shows the count. When a slip looks like two slips touching, or
-   is much larger than the rest, it asks before reading (Read anyway or
-   Retake). Each slip is read twice and graded in code. Each result is saved
-   the moment its two reads finish, so a refresh loses nothing already read,
-   and an interrupted photo is named on the next load. Stop reading ends a
-   photo early and keeps what was already graded. The photo and its crops are
-   released once read. While slips are being read, the page keeps the screen
-   awake, and lets it sleep again when reading ends.
+   permission prompt); Upload photo takes a file on any device. One full page
+   (homework, a quiz, a test) can fill most of the frame, and can rest on other
+   white pages. The page finds each slip and shows the count; when a mostly
+   bright photo shows no paper edges, it reads the whole photo as one paper and
+   says so. When a slip looks like two slips touching, or is much larger than
+   the rest, it asks before reading (Read anyway or Retake). Each slip is read
+   twice and graded in code. Each result is saved the moment its two reads
+   finish, so a refresh loses nothing already read, and an interrupted photo is
+   named on the next load. Stop reading ends a photo early and keeps what was
+   already graded. The photo and its crops are released once read. While slips
+   are being read, the page keeps the screen awake, and lets it sleep again
+   when reading ends.
 4. **Done.** The page builds `TABot_<assignment>_<date>.xlsx` (a Roster tab and
    a Summary tab), hands it to the browser's downloads, and asks "Did the file
    save?". **Yes** deletes every result from this browser; **No** downloads it
@@ -105,7 +108,10 @@ local file, and it says so on screen.
   strip-shaped slip gets the same question.
 - A download made just before the 24-hour mark can be deleted with the other
   results at that mark, even while "Did the file save?" is on screen.
-- Slips must be lighter than the surface they lie on.
+- Slips must be lighter than the surface they lie on. Several papers on a
+  white or pale surface, or on a white stack, merge into one bright region and
+  are read as one paper: one paper per photo on white. A page on a white stack
+  is cut with the stack edges round it.
 - A Value question compares values, not form: on "simplify 6/8" a student who
   copies `6/8` gets the point, and `4^2` matches `2^4`. Set such a question to
   Exact form.

@@ -1,6 +1,7 @@
-// TABot.segment: finds the exit slips in a photo of slips laid on a dark or
-// colored surface. Pure functions on plain rasters ({width, height, data}),
-// no canvas, so node tests run the same code the page runs.
+// TABot.segment: finds the papers in a photo: exit slips laid on a dark or
+// colored surface, or a full page filling most of the frame. Pure functions
+// on plain rasters ({width, height, data}), no canvas, so node tests run the
+// same code the page runs. The code says "slip" for any one paper.
 //
 // Coordinates are continuous pixel coordinates: pixel (x, y) covers the square
 // [x, x+1) x [y, y+1), so a rect scales exactly with the image.
@@ -24,7 +25,26 @@
 
   var DEFAULTS = {
     minAreaFrac: 0.004,
-    maxAreaFrac: 0.6,
+    // A page can fill nearly the whole frame, so no blob is too big.
+    maxAreaFrac: 1,
+    // A blob that touches the photo's edge and is a thin strip (short side
+    // under this fraction of the photo's short side, or long side over
+    // sliverAspect times its short side) is the edge of a page lying under
+    // the others, not a paper to read, when a blob at least sliverRatio times
+    // its area is in the photo too.
+    sliverFrac: 0.12,
+    sliverAspect: 4,
+    sliverRatio: 4,
+    // A blob over this fraction of the photo that touches two or more of its
+    // edges is a page the frame cuts off: its outline says nothing about
+    // slips touching, so it is never suspect.
+    pageFrac: 0.5,
+    // With no paper found, the whole photo is read as one paper when at least
+    // this fraction of it is paper-bright (luma at or over brightLuma): a
+    // page too big, too plain or too pale against what it rests on to find
+    // edges for. A photo darker than that has no paper in it.
+    wholeBrightFrac: 0.4,
+    brightLuma: 150,
     // When the bright and dark halves of the histogram sit closer than this,
     // the photo is one surface with lighting on it, not paper on a surface.
     minContrast: 40,
@@ -138,7 +158,8 @@
   // 8-connected components by breadth-first search over a typed queue (no
   // recursion, so a big slip cannot overflow the stack). For each component
   // in the area range it keeps only the leftmost and rightmost pixel of every
-  // row: the convex hull of a pixel set is the hull of those row ends.
+  // row: the convex hull of a pixel set is the hull of those row ends. edges
+  // counts the sides of the photo the component touches.
   function collectBlobs(mask, W, H, queue, minArea, maxArea) {
     var N = W * H, blobs = [];
     var rowMin = new Int32Array(H).fill(W), rowMax = new Int32Array(H).fill(-1);
@@ -174,7 +195,14 @@
       }
 
       if (area >= minArea && area <= maxArea) {
-        blobs.push({ area: area, points: rowEndCorners(rowMin, rowMax, y0, y1) });
+        var xMin = W, xMax = -1;
+        for (var e = y0; e <= y1; e++) {
+          if (rowMax[e] < 0) continue;
+          if (rowMin[e] < xMin) xMin = rowMin[e];
+          if (rowMax[e] > xMax) xMax = rowMax[e];
+        }
+        var edges = (y0 === 0) + (y1 === H - 1) + (xMin === 0) + (xMax === W - 1);
+        blobs.push({ area: area, edges: edges, points: rowEndCorners(rowMin, rowMax, y0, y1) });
       }
       for (var r = y0; r <= y1; r++) { rowMin[r] = W; rowMax[r] = -1; }
     }
@@ -334,6 +362,7 @@
   //   judged against each other and pass.
   function suspicion(found, i, medianArea, o) {
     var f = found[i];
+    if (f.page) return null;
     if (f.fill < o.minFill) return 'touching';
     if (found.length >= 3) {
       var others = [];
@@ -396,13 +425,35 @@
 
   // ---- the pipeline ----------------------------------------------------
 
+  // The whole photo as one paper, in the photo's own pixels.
+  function wholeFrame(width, height) {
+    return { cx: width / 2, cy: height / 2, w: width, h: height, angle: 0, suspect: null, whole: true };
+  }
+
+  // No paper found: the whole photo when it is mostly paper-bright, with the
+  // 'whole' warning; otherwise nothing, with the 'none' warning.
+  function nothingFound(gray, o) {
+    var data = gray.data, n = data.length, bright = 0;
+    for (var i = 0; i < n; i++) if (data[i] >= o.brightLuma) bright++;
+    if (n && bright >= o.wholeBrightFrac * n) {
+      return { slips: [wholeFrame(gray.width, gray.height)], warnings: ['whole'] };
+    }
+    return { slips: [], warnings: ['none'] };
+  }
+
+  function isSliver(f, shortPhotoSide, o) {
+    if (!f.edges) return false;
+    var shortSide = Math.min(f.rect.w, f.rect.h);
+    return shortSide < o.sliverFrac * shortPhotoSide || f.aspect > o.sliverAspect;
+  }
+
   function findSlipsDetailed(raster, opts) {
     var o = options(opts);
     var gray = asGray(raster), W = gray.width, H = gray.height, N = W * H;
     if (!N) return { slips: [], warnings: ['none'] };
 
     var split = otsu(gray);
-    if (!(split.lightMean - split.darkMean >= o.minContrast)) return { slips: [], warnings: ['none'] };
+    if (!(split.lightMean - split.darkMean >= o.minContrast)) return nothingFound(gray, o);
 
     var data = gray.data, t = split.threshold, mask = new Uint8Array(N);
     for (var i = 0; i < N; i++) mask[i] = data[i] > t ? 1 : 0;
@@ -410,11 +461,23 @@
     var queue = new Int32Array(N);
     if (o.fillHoles) fillHoles(mask, W, H, queue);
     var blobs = collectBlobs(mask, W, H, queue, o.minAreaFrac * N, o.maxAreaFrac * N);
-    if (!blobs.length) return { slips: [], warnings: ['none'] };
+    if (!blobs.length) return nothingFound(gray, o);
 
     var found = blobs.map(function (b) {
       var rect = minAreaRect(convexHull(b.points)), rectArea = rect.w * rect.h;
-      return { rect: rect, area: b.area, fill: rectArea > 0 ? b.area / rectArea : 1, aspect: aspectOf(rect) };
+      return {
+        rect: rect,
+        area: b.area,
+        edges: b.edges,
+        fill: rectArea > 0 ? b.area / rectArea : 1,
+        aspect: aspectOf(rect),
+        page: b.edges >= 2 && b.area > o.pageFrac * N
+      };
+    });
+    var biggest = Math.max.apply(null, found.map(function (f) { return f.area; }));
+    var shortPhotoSide = Math.min(W, H);
+    found = found.filter(function (f) {
+      return !(isSliver(f, shortPhotoSide, o) && biggest >= o.sliverRatio * f.area);
     });
     var medianArea = median(found.map(function (f) { return f.area; }));
 
@@ -436,6 +499,7 @@
   return {
     toGray: toGray,
     otsuThreshold: otsuThreshold,
+    wholeFrame: wholeFrame,
     findSlips: findSlips,
     findSlipsDetailed: findSlipsDetailed,
     cropPlan: cropPlan,
