@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src https://api.groq.com; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>TABot</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="masthead">
+  <div id="storage-warning" class="banner" role="alert" hidden></div>
+  <h1>TABot</h1>
+  <p class="lede">Photograph your exit slips. Get one spreadsheet back.</p>
+</header>
+
+<main>
+  <section class="step" aria-labelledby="setup-title">
+    <h2 id="setup-title"><span class="step-num" aria-hidden="true">1</span> Setup</h2>
+    <div class="field">
+      <span class="label">Provider</span>
+      <p class="provider" id="provider-name">Groq</p>
+    </div>
+    <div class="field">
+      <label for="api-key">Groq API key</label>
+      <input id="api-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off">
+      <p class="hint">Kept in this browser only and sent only to Groq.</p>
+    </div>
+    <button id="check-key" type="button" class="btn btn-primary">Check key</button>
+    <p id="setup-status" class="status" aria-live="polite"></p>
+    <div id="setup-storage" class="note" role="alert" hidden></div>
+    <div id="setup-error" class="error" role="alert" hidden></div>
+    <div id="model-field" class="field field-after" hidden>
+      <label for="model">Model that reads the slips</label>
+      <select id="model"></select>
+      <p class="hint">Only models that read images are listed. If one fails on a slip, the next one takes it.</p>
+      <div id="model-storage" class="note" role="alert" hidden></div>
+    </div>
+  </section>
+
+  <section class="step" aria-labelledby="key-title">
+    <h2 id="key-title"><span class="step-num" aria-hidden="true">2</span> Answer key</h2>
+    <div class="field">
+      <label for="assignment">Assignment name</label>
+      <input id="assignment" type="text" autocomplete="off" spellcheck="false" placeholder="Unit 3 exit slip">
+    </div>
+    <div class="field-pair">
+      <div class="field">
+        <label for="pass-percent">Pass mark (%)</label>
+        <input id="pass-percent" type="number" inputmode="numeric" min="0" max="100" step="1" value="70">
+      </div>
+      <div class="field">
+        <label for="question-count">Questions</label>
+        <input id="question-count" type="number" inputmode="numeric" min="1" max="30" step="1" value="5">
+      </div>
+    </div>
+    <p id="count-locked" class="hint" hidden></p>
+    <div class="questions" role="group" aria-label="Answers, points and match settings">
+      <div class="q-row q-head" aria-hidden="true">
+        <span class="q-label">Q</span><span class="q-answer">Answer</span><span class="q-points">Points</span><span class="q-match">Match</span>
+      </div>
+      <div id="question-rows"></div>
+    </div>
+    <p id="match-hint" class="hint">Value: 1/2, 0.5 and 2/4 all count. Exact form: the answer must be written the way the key is (6/8 does not count for 3/4).</p>
+    <div id="key-storage" class="note" role="alert" hidden></div>
+  </section>
+
+  <section class="step" aria-labelledby="photos-title">
+    <h2 id="photos-title"><span class="step-num" aria-hidden="true">3</span> Photos</h2>
+    <ul class="tips">
+      <li>5 to 10 slips per photo.</li>
+      <li>Lay them flat on a dark or colored surface, not overlapping, with a gap between them.</li>
+      <li>Good light, shot straight down, every slip fully in the frame.</li>
+    </ul>
+    <div class="capture">
+      <input id="take-photo" class="file-input" type="file" accept="image/*" capture="environment">
+      <label id="take-photo-button" class="btn btn-primary" for="take-photo">Take photo</label>
+      <input id="upload-photo" class="file-input" type="file" accept="image/*">
+      <label id="upload-photo-button" class="btn btn-secondary" for="upload-photo">Upload photo</label>
+    </div>
+    <p id="photo-hint" class="hint" hidden></p>
+    <p id="photo-found" class="status" aria-live="polite"></p>
+    <div id="photo-check" class="confirm" role="group" aria-labelledby="photo-found" hidden>
+      <p id="photo-check-text"></p>
+      <div class="confirm-actions">
+        <button id="read-anyway" type="button" class="btn btn-secondary">Read anyway</button>
+        <button id="retake" type="button" class="btn btn-primary">Retake</button>
+      </div>
+    </div>
+    <p id="photo-progress" class="status" aria-live="polite"></p>
+    <p id="photo-wait" class="status status-wait" aria-live="polite"></p>
+    <button id="stop-reading" type="button" class="btn btn-secondary stop-reading" hidden>Stop reading</button>
+    <div id="photo-storage" class="note" role="alert" hidden></div>
+    <div id="photo-error" class="error" role="alert" hidden></div>
+  </section>
+
+  <section class="step" aria-labelledby="results-title">
+    <h2 id="results-title"><span class="step-num" aria-hidden="true">4</span> Results</h2>
+    <p id="results-empty" class="hint">No results yet. Each photo's slips show up here once they are read.</p>
+    <p id="results-status" class="status" aria-live="polite"></p>
+    <p id="results-legend" class="hint" hidden>* means check that slip by hand: the two reads disagreed, the reader was unsure, or the name was unclear.</p>
+    <div id="results"></div>
+    <p id="results-unread" class="note" hidden>Results saved earlier cannot be read right now, so they are not shown and not in the spreadsheet; a reload brings them back.</p>
+    <div id="results-storage" class="note" role="alert" hidden></div>
+  </section>
+
+  <section class="step" aria-labelledby="done-title">
+    <h2 id="done-title"><span class="step-num step-num-done" aria-hidden="true">&#10003;</span> Done</h2>
+    <p class="hint">Downloads the spreadsheet, then asks whether it saved. Results are deleted from this browser once you say it did, or 24 hours after the last photo if you never do. Your key and answer key stay.</p>
+    <button id="done" type="button" class="btn btn-primary" disabled>Download spreadsheet</button>
+    <p id="done-hint" class="hint" hidden></p>
+    <p id="done-status" class="status" aria-live="polite"></p>
+    <div id="done-confirm" class="confirm" role="group" aria-labelledby="done-confirm-text" hidden>
+      <p id="done-confirm-text"></p>
+      <div class="confirm-actions">
+        <button id="done-yes" type="button" class="btn btn-primary">Download</button>
+        <button id="done-no" type="button" class="btn btn-secondary">Cancel</button>
+      </div>
+    </div>
+    <div id="done-saved" class="confirm" role="group" aria-labelledby="done-saved-text" hidden>
+      <p id="done-saved-text">Did the file save?</p>
+      <div class="confirm-actions">
+        <button id="saved-yes" type="button" class="btn btn-primary">Yes, clear the results</button>
+        <button id="saved-no" type="button" class="btn btn-secondary">No, download again</button>
+      </div>
+    </div>
+    <div id="done-storage" class="note" role="alert" hidden></div>
+  </section>
+</main>
+
+<script src="vendor/math.js"></script>
+<script src="vendor/xlsx.mini.min.js"></script>
+<script src="js/queue.js"></script>
+<script src="js/providers/groq.js"></script>
+<script src="js/providers/index.js"></script>
+<script src="js/prompt.js"></script>
+<script src="js/segment.js"></script>
+<script src="js/enhance.js"></script>
+<script src="js/grade.js"></script>
+<script src="js/sheet.js"></script>
+<script src="js/store.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

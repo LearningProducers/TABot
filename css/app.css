@@ -1,0 +1,556 @@
+/* TABot: phone-first, one column, calm. Every style lives here; the page's
+   Content-Security-Policy forbids inline styles. */
+
+:root {
+  --bg: #f4f3ef;
+  --surface: #ffffff;
+  --text: #1c1e22;
+  --muted: #555b66;
+  --line: #d8d5cc;
+  --field: #ffffff;
+  --accent: #1d5c8a;
+  --accent-hover: #174c73;
+  --accent-text: #ffffff;
+  --accent-soft: #e4eef6;
+  --secondary-text: #1d5c8a;
+  --error: #9c2518;
+  --error-soft: #fcebe8;
+  --warn-soft: #fff5d9;
+  --warn-line: #d9b24a;
+  --focus: #f0a500;
+  --radius: 14px;
+  --tap: 48px;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a;
+    --surface: #1f2226;
+    --text: #eceae4;
+    --muted: #a7abb3;
+    --line: #3a3e45;
+    --field: #17191c;
+    --accent: #5aa3d6;
+    --accent-hover: #74b4e1;
+    --accent-text: #0e1114;
+    --accent-soft: #1d2b36;
+    --secondary-text: #8cc3ea;
+    --error: #ff9c8f;
+    --error-soft: #3a1f1c;
+    --warn-soft: #3a3120;
+    --warn-line: #a88a3a;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+}
+
+.masthead,
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+.masthead {
+  padding-top: 24px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.9rem;
+  letter-spacing: -0.01em;
+}
+
+.lede {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+main {
+  padding-bottom: 48px;
+}
+
+/* ---- steps ---- */
+
+.step {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px 16px 22px;
+  margin: 18px 0;
+}
+
+.step h2 {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 18px;
+  font-size: 1.3rem;
+  line-height: 1.2;
+}
+
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+/* ---- fields ---- */
+
+.field {
+  margin: 0 0 16px;
+  min-width: 0;
+}
+
+.field-after {
+  margin-top: 18px;
+}
+
+label,
+.label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.provider {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--tap);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--field);
+  color: var(--text);
+  /* 17px keeps iOS Safari from zooming the page when a field takes focus. */
+  font: inherit;
+  font-size: 17px;
+}
+
+/* Safari draws a native select at its own small height; a plain box with a
+   drawn chevron keeps it the same big tap target as the other fields. */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 40px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23555b66' stroke-width='2'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+}
+
+@media (prefers-color-scheme: dark) {
+  select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23a7abb3' stroke-width='2'/%3E%3C/svg%3E");
+  }
+}
+
+input:disabled,
+select:disabled {
+  opacity: 0.6;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.field-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.hint {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.status {
+  margin: 12px 0 0;
+  font-weight: 500;
+}
+
+.status:empty {
+  display: none;
+}
+
+.error {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border-left: 4px solid var(--error);
+  border-radius: 8px;
+  background: var(--error-soft);
+  color: var(--text);
+}
+
+.error p {
+  margin: 0;
+  font-weight: 600;
+}
+
+.error ul {
+  margin: 8px 0 0;
+  padding-left: 1.2em;
+}
+
+/* Storage messages sit in the page's flow, never over it: the banner at the
+   top of the masthead for a problem known as the page loads, and a note
+   below the control whose store call found one later (app.js tellStorage).
+   A note only ever appears below the control, so it never moves it. */
+.banner,
+.note {
+  padding: 12px 14px;
+  border: 1px solid var(--warn-line);
+  border-radius: 10px;
+  background: var(--warn-soft);
+}
+
+.banner {
+  margin: 0 0 16px;
+}
+
+.note {
+  margin: 12px 0 0;
+}
+
+/* ---- answer key ---- */
+
+.questions {
+  margin-top: 4px;
+}
+
+/* On a phone each question takes two lines: the answer keeps most of the
+   width on the first, with points beside it, and the match setting sits
+   under the answer. From 640px wide they share one line. */
+.q-row {
+  display: grid;
+  grid-template-columns: 2.6rem minmax(0, 1fr) 4.6rem;
+  grid-template-areas:
+    "label answer points"
+    ".     match  match";
+  column-gap: 8px;
+  row-gap: 6px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.q-label {
+  grid-area: label;
+  font-weight: 700;
+}
+
+.q-answer {
+  grid-area: answer;
+}
+
+.q-points {
+  grid-area: points;
+}
+
+.q-match {
+  grid-area: match;
+}
+
+.q-head {
+  grid-template-areas: "label answer points";
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.q-head .q-label {
+  font-weight: inherit;
+}
+
+.q-head .q-match {
+  display: none;
+}
+
+/* Compact, and still a 44px tap target; 16px text keeps iOS Safari from
+   zooming when it opens. */
+select.q-match {
+  justify-self: start;
+  width: 8.5rem;
+  min-height: 44px;
+  padding: 8px 30px 8px 10px;
+  font-size: 16px;
+  background-position: right 10px center;
+}
+
+@media (min-width: 640px) {
+  .q-row {
+    grid-template-columns: 2.6rem minmax(0, 1fr) 4.6rem 8.5rem;
+    grid-template-areas: "label answer points match";
+    margin-bottom: 8px;
+  }
+
+  .q-head .q-match {
+    display: block;
+  }
+}
+
+/* ---- buttons ---- */
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: var(--tap);
+  margin: 0;
+  padding: 12px 20px;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  font: inherit;
+  font-weight: 650;
+  text-align: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--secondary-text);
+}
+
+.btn-secondary:hover {
+  background: var(--accent-soft);
+}
+
+.btn-small {
+  width: auto;
+  min-height: 44px;
+  padding: 8px 14px;
+  font-size: 0.95rem;
+}
+
+.btn:disabled,
+.btn.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover,
+.btn.is-disabled:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.btn-secondary:disabled:hover,
+.btn-secondary.is-disabled:hover {
+  background: transparent;
+}
+
+/* ---- photos ---- */
+
+.tips {
+  margin: 0 0 18px;
+  padding-left: 1.2em;
+}
+
+.tips li {
+  margin-bottom: 4px;
+}
+
+.capture {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+/* The real file inputs stay in the page (and keyboard reachable) but take no
+   room; their labels are the big buttons. */
+.file-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.file-input:focus-visible + .btn {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.capture .btn {
+  min-height: 56px;
+  font-size: 1.05rem;
+}
+
+@media (min-width: 480px) {
+  .capture {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+/* What the queue is waiting on right now: a 429 backoff, or no answer. */
+.status-wait {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.stop-reading {
+  margin-top: 12px;
+}
+
+/* ---- results ---- */
+
+.photo-group {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.photo-group:first-child {
+  margin-top: 8px;
+}
+
+.photo-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.photo-head h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.photo-count {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.results-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.results-table th,
+.results-table td {
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.results-table th {
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.results-table .col-student {
+  width: 50%;
+}
+
+.results-table .col-score {
+  width: 22%;
+}
+
+.results-table .col-flags {
+  width: 28%;
+}
+
+.results-table .num {
+  font-variant-numeric: tabular-nums;
+}
+
+.results-table .flag {
+  color: var(--error);
+  font-weight: 600;
+}
+
+/* ---- confirm panels ---- */
+
+.confirm {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--accent-soft);
+}
+
+.confirm p {
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
+.confirm-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+@media (min-width: 480px) {
+  .confirm-actions {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
