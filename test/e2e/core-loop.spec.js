@@ -218,6 +218,31 @@ function errorReply(status, message, type) {
   return { status, body: { error: { message, type: type || 'invalid_request_error' } } };
 }
 
+// The questions an analysis request lists, from its user text ("Q2: ...").
+function analysisQuestions(body) {
+  const user = ((body.messages || []).find((m) => m.role === 'user') || {}).content;
+  const text = typeof user === 'string' ? user : (user || []).filter((p) => p.type === 'text').map((p) => p.text).join('\n');
+  return (text.match(/^Q(\d+)[:.]/gm) || []).map((m) => Number(m.slice(1, -1)));
+}
+
+function analysisReply(model, text, errors) {
+  return { status: 200, body: completion(model, JSON.stringify({ analysis: text, errors })) };
+}
+
+function defaultAnalysis(crop, body) {
+  const qs = analysisQuestions(body);
+  return analysisReply(body.model, 'Mock analysis: the work goes wrong on ' + qs.map((q) => 'Q' + q).join(', ') + '.',
+    qs.map((q) => ({ q, pattern: 'addition' })));
+}
+
+function solveReply(model, answer, gradable) {
+  return { status: 200, body: completion(model, JSON.stringify({ work: '', gradable: gradable !== false, answer: gradable === false ? '' : answer })) };
+}
+
+function defaultSolve(body) {
+  return solveReply(body.model, '', false);
+}
+
 // The connection drops: no answer at all (the page's fetch fails).
 const NO_ANSWER = { abort: true };
 
@@ -229,8 +254,13 @@ function imageOf(body) {
 
 // answerRead(crop, model, entry) -> {status, body}, NO_ANSWER, or a promise
 // of either (mock.hold) for a read of a known crop. Any request whose
-// Authorization is not "Bearer <KEY>" gets a 401.
-function createGroqMock(answerRead) {
+// Authorization is not "Bearer <KEY>" gets a 401. The page's other two kinds
+// of call are told apart by their system prompt: a solve (text only, one
+// question with no key) goes to opts.solve(body, entry), and an analysis
+// (the reader's crop again) to opts.analysis(crop, body, entry); each
+// defaults to a plain answer below.
+function createGroqMock(answerRead, opts) {
+  opts = opts || {};
   const crops = new Map(); // image data URL -> {photoIndex, slipIndex, pass, dataUrl}
   const cropList = [];
   const log = []; // every non-preflight Groq request, with the status it got
@@ -282,6 +312,21 @@ function createGroqMock(answerRead) {
         entry.kind = 'probe';
         if (VISION.has(body.model)) return { status: 200, body: completion(body.model, 'OK') };
         return errorReply(400, 'model `' + body.model + '` does not support image input');
+      }
+      const system = ((body.messages || []).find((m) => m.role === 'system') || {}).content || '';
+      if (/You solve one school math question/.test(system)) {
+        entry.kind = 'solve';
+        return (opts.solve || defaultSolve)(body, entry);
+      }
+      if (/describe how the student worked/.test(system)) {
+        entry.kind = 'analysis';
+        const seenCrop = crops.get(imageOf(body));
+        if (!seenCrop) {
+          failures.push('an analysis arrived for an image the onCrop hook never saw');
+          return errorReply(400, 'unknown image');
+        }
+        entry.crop = seenCrop;
+        return (opts.analysis || defaultAnalysis)(seenCrop, body, entry);
       }
       entry.kind = 'read';
       entry.responseFormat = body.response_format;
@@ -752,6 +797,17 @@ function rosterNames(sheet) {
   return sheetRows(sheet.wb.Sheets.Roster, 1).slice(1).map((row) => row[0]);
 }
 
+// The Analysis (AI) cell for a student, as the page writes it: a line from
+// code when every answer is right or every miss is blank, and otherwise the
+// mock's analysis naming the wrong answers that are not blank.
+function analysisCell(student) {
+  const wrong = student.correct.map((ok, i) => (ok ? null : i + 1)).filter(Boolean);
+  const written = wrong.filter((q) => student.answers[q - 1] !== '');
+  if (!wrong.length) return 'Every graded answer matches the expected answer.';
+  if (!written.length) return 'Left ' + wrong.map((q) => 'Q' + q).join(', ') + ' blank.';
+  return 'Mock analysis: the work goes wrong on ' + written.map((q) => 'Q' + q).join(', ') + '.';
+}
+
 function expectedRosterRow(student, slipIndex) {
   const flagged = student.name === FLAGGED_STUDENT;
   const cells = student.answers.map((a, i) => {
@@ -761,6 +817,7 @@ function expectedRosterRow(student, slipIndex) {
   });
   return [student.name, student.score, 5, student.score * 20].concat(cells, [
     flagged ? '*' : '',
+    analysisCell(student),
     flagged ? 'Q4: reader .75, reviewer 1.75' : '',
     slipIndex === FALLBACK_SLIP ? BETA : ALPHA,
     ALPHA,
@@ -836,9 +893,9 @@ test('photo to spreadsheet on a mocked Groq', async ({ page, context }, testInfo
   // The chosen file was let go as soon as it was decoded: the input no
   // longer holds it while the slips are read.
   expect(await upload.evaluate((input) => input.files.length)).toBe(0);
-  await expect(page.locator('#photo-found')).toHaveText('Found ' + CLASS.ordered.length + ' slips.');
+  await expect(page.locator('#photo-found')).toHaveText('Found ' + CLASS.ordered.length + ' papers.');
   await expect(page.locator('#photo-wait')).toHaveText(
-    'Groq is busy; waiting 1 s before retrying slip ' + (limited.slipIndex + 1) + '.');
+    'Groq is busy; waiting 1 s before retrying paper ' + (limited.slipIndex + 1) + '.');
   // Every other slip is stored the moment its two reads finish.
   await expect(page.locator('#results tbody tr')).toHaveCount(CLASS.ordered.length - 1);
   await expect(page.locator('#stop-reading')).toBeVisible();
@@ -850,7 +907,7 @@ test('photo to spreadsheet on a mocked Groq', async ({ page, context }, testInfo
 
   mock.release();
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.', { timeout: 60000 });
-  await expect(page.locator('#photo-found')).toHaveText('Found ' + CLASS.ordered.length + ' slips.');
+  await expect(page.locator('#photo-found')).toHaveText('Found ' + CLASS.ordered.length + ' papers.');
   await expect(page.locator('#photo-error')).toBeHidden();
   await expect(page.locator('#photo-wait')).toBeEmpty();
   await expect(page.locator('#stop-reading')).toBeHidden();
@@ -867,7 +924,7 @@ test('photo to spreadsheet on a mocked Groq', async ({ page, context }, testInfo
   CLASS.ordered.forEach((truth, slipIndex) => {
     const reader = mock.cropList.find((c) => c.slipIndex === slipIndex && c.pass === 'reader');
     const reviewer = mock.cropList.find((c) => c.slipIndex === slipIndex && c.pass === 'reviewer');
-    expect(reader && reviewer, 'slip ' + slipIndex + ' read twice').toBeTruthy();
+    expect(reader && reviewer, 'paper ' + slipIndex + ' read twice').toBeTruthy();
     expect(reader.photoIndex).toBe(0);
     expect(reader.dataUrl.startsWith('data:image/jpeg;base64,')).toBe(true);
     expect(reviewer.dataUrl.startsWith('data:image/jpeg;base64,')).toBe(true);
@@ -933,11 +990,11 @@ test('photo to spreadsheet on a mocked Groq', async ({ page, context }, testInfo
   const file = testInfo.outputPath(download.suggestedFilename());
   await download.saveAs(file);
   const wb = XLSX.read(fs.readFileSync(file), { type: 'buffer' });
-  expect(wb.SheetNames).toEqual(['Roster', 'Summary']);
+  expect(wb.SheetNames).toEqual(['Roster', 'Summary', 'Exemplars']);
 
-  const roster = sheetRows(wb.Sheets.Roster, 13);
+  const roster = sheetRows(wb.Sheets.Roster, 14);
   expect(roster[0]).toEqual(['Student', 'Score', 'Max', 'Percent', 'Q1', 'Q2', 'Q3', 'Q4',
-    'Flags', 'Notes', 'Read by', 'Reviewed by', 'Review']);
+    'Flags', 'Analysis (AI)', 'Notes', 'Read by', 'Reviewed by', 'Review']);
   expect(roster.slice(1)).toEqual(EXPECTED.map(expectedRosterRow));
 
   // Percents 100, 80, 40, 60, 80, 80, 40: mean 480/7, median 80, 4 of 7 at
@@ -959,8 +1016,18 @@ test('photo to spreadsheet on a mocked Groq', async ({ page, context }, testInfo
     ['', '', ''],
     ['Score band', 'Students', ''],
     ['0-9%', 0, ''], ['10-19%', 0, ''], ['20-29%', 0, ''], ['30-39%', 0, ''], ['40-49%', 2, ''],
-    ['50-59%', 0, ''], ['60-69%', 1, ''], ['70-79%', 0, ''], ['80-89%', 3, ''], ['90-100%', 1, '']
+    ['50-59%', 0, ''], ['60-69%', 1, ''], ['70-79%', 0, ''], ['80-89%', 3, ''], ['90-100%', 1, ''],
+    ['', '', ''],
+    // Six papers had a wrong answer that was not blank, and each got the
+    // mock's analysis; every paper but Ada's.
+    ['Common error patterns (AI observations)', 'Students', 'Questions'],
+    ['addition', 6, 'Q1, Q2, Q3, Q4']
   ]);
+  // No reads carried printed questions, so no exemplar: each says why.
+  const exemplars = sheetRows(wb.Sheets.Exemplars, 2);
+  expect(exemplars[0][0]).toMatch(/^Worked examples, computed and checked by TABot's code, not by AI\./);
+  expect(exemplars.filter((r) => /^Q\d$/.test(r[0])).map((r) => r[1])).toEqual(
+    [1, 2, 3, 4].map(() => 'No worked example: No printed question was read at this number.'));
 
   // The page asks, and every result is still stored until the teacher answers.
   await expect(page.locator('#done-saved')).toBeVisible();
@@ -1032,16 +1099,20 @@ test('plain-language errors, failed reads, and discard', async ({ page, context 
   await expect(page.locator('#setup-status')).toHaveText('2 of 4 models read images.');
   await expect(page.locator('#setup-error')).toBeHidden();
 
-  // ---- An answer key with a blank answer keeps the camera off.
+  // ---- A blank key answer is allowed: the camera is on, and the Exact
+  // form setting waits for an answer to compare with.
   await fillAnswerKey(page, [['1/2', '1'], ['', '1']]);
-  await expect(page.locator('#photo-hint')).toContainText('Fill in the answer to Q2 in step 2.');
-  await expect(page.locator('#take-photo')).toBeDisabled();
+  await expect(page.locator('#photo-hint')).toBeHidden();
+  await expect(page.locator('#take-photo')).toBeEnabled();
+  await expect(page.locator('#q2-match')).toBeDisabled();
+  await expect(page.locator('#q1-match')).toBeEnabled();
   await page.fill('#q2-answer', '4');
+  await expect(page.locator('#q2-match')).toBeEnabled();
   await expect(page.locator('#take-photo')).toBeEnabled();
 
   // ---- No slips: say so, with the capture tips.
   await sendPhoto(page, 'empty-table.png', photos.blank);
-  await expect(page.locator('#photo-error')).toContainText('No slips found in this photo.');
+  await expect(page.locator('#photo-error')).toContainText('No papers found in this photo.');
   await expect(page.locator('#photo-error li')).toHaveCount(4);
   await expect(page.locator('#photo-error')).toContainText('dark or colored surface');
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
@@ -1049,7 +1120,7 @@ test('plain-language errors, failed reads, and discard', async ({ page, context 
   // ---- Touching slips: nothing is read until the teacher answers; Retake
   // sets the photo aside.
   await sendPhoto(page, 'touching.png', photos.touching);
-  await expect(page.locator('#photo-found')).toHaveText('Found 4 slips. One looks like two slips touching.');
+  await expect(page.locator('#photo-found')).toHaveText('Found 4 papers. One looks like two papers touching.');
   await expect(page.locator('#photo-check')).toBeVisible();
   await expect(page.locator('#read-anyway')).toBeVisible();
   await expect(page.locator('#retake')).toBeVisible();
@@ -1060,7 +1131,7 @@ test('plain-language errors, failed reads, and discard', async ({ page, context 
   await page.click('#retake');
   await expect(page.locator('#photo-check')).toBeHidden();
   await expect(page.locator('#photo-found')).toHaveText(
-    'Photo set aside; nothing was read. Take it again once the slips are spread out.');
+    'Photo set aside; nothing was read. Take it again once the papers are spread out.');
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
   await expect(page.locator('#results tbody tr')).toHaveCount(0);
   await expect(page.locator('#question-count')).toBeEnabled();
@@ -1071,13 +1142,13 @@ test('plain-language errors, failed reads, and discard', async ({ page, context 
   // flagged. The retaken photo used no photo number.
   await sendPhoto(page, 'trio.png', photos.trio.png);
   await expect(page.locator('#photo-error')).toContainText(
-    '2 of 3 slips could not be read, even after retries and trying every model.', { timeout: 60000 });
-  await expect(page.locator('#photo-error')).toContainText('Slip 2: Groq stayed busy, even after waiting and retrying.');
-  await expect(page.locator('#photo-error')).toContainText('Slip 3: No answer from Groq; check the connection.');
+    '2 of 3 papers could not be read, even after retries and trying every model.', { timeout: 60000 });
+  await expect(page.locator('#photo-error')).toContainText('Paper 2: Groq stayed busy, even after waiting and retrying.');
+  await expect(page.locator('#photo-error')).toContainText('Paper 3: No answer from Groq; check the connection.');
   await expect(page.locator('#photo-error')).toContainText('Press Check key in step 1 to refresh the model list.');
-  await expect(page.locator('#photo-found')).toHaveText('Found 3 slips.');
+  await expect(page.locator('#photo-found')).toHaveText('Found 3 papers.');
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
-  await expect(page.locator('#results .photo-head h3')).toHaveText(['Photo 1 (1 slip)']);
+  await expect(page.locator('#results .photo-head h3')).toHaveText(['Photo 1 (1 paper)']);
   await expect(page.locator('#results td.student')).toHaveText(['Hal Fixture']);
   await expect(page.locator('#results td.score')).toHaveText(['2/2']);
   await expect(page.locator('#results td.flag')).toHaveText(['* no second read']);
@@ -1106,7 +1177,7 @@ test('plain-language errors, failed reads, and discard', async ({ page, context 
 
 // ---------------------------------------------------------------- test 3
 
-test('a reload mid-photo and Stop reading keep every slip already read', async ({ page, context }) => {
+test('a reload mid-photo and Stop reading keep every paper already read', async ({ page, context }) => {
   const five = fivePhoto();
   // Slips 1 and 2 of every photo are answered; the reads of slips 3 to 5
   // hang until the test lets them go.
@@ -1145,7 +1216,7 @@ test('a reload mid-photo and Stop reading keep every slip already read', async (
 
   await expect(page.locator('#results tbody tr')).toHaveCount(saved1);
   await expect(page.locator('#photo-error')).toContainText(
-    'Photo 1 was interrupted after ' + saved1 + ' of 5 slips; take it again to read the rest.');
+    'Photo 1 was interrupted after ' + saved1 + ' of 5 papers; take it again to read the rest.');
   await expect.poll(() => page.evaluate(storedMetaIds)).toEqual(['lastPhoto', 'meta']);
   expect(await page.evaluate(leavingAsks)).toBe(false);
   await page.reload();
@@ -1164,7 +1235,7 @@ test('a reload mid-photo and Stop reading keep every slip already read', async (
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
   const left = 5 - saved2;
   await expect(page.locator('#photo-error')).toContainText(
-    'Stopped reading photo 2. ' + saved2 + ' of 5 slips ' + (saved2 === 1 ? 'was' : 'were') + ' saved; the other ' +
+    'Stopped reading photo 2. ' + saved2 + ' of 5 papers ' + (saved2 === 1 ? 'was' : 'were') + ' saved; the other ' +
     left + (left === 1 ? ' needs' : ' need') + ' a retake.');
   await expect(page.locator('#photo-error')).toContainText('counted left to right, top row first');
   await expect(page.locator('#stop-reading')).toBeHidden();
@@ -1172,8 +1243,8 @@ test('a reload mid-photo and Stop reading keep every slip already read', async (
   await expect(page.locator('#done')).toBeEnabled();
   await expect(page.locator('#results tbody tr')).toHaveCount(saved1 + saved2);
   await expect(page.locator('#results .photo-head h3')).toHaveText([
-    'Photo 1 (' + saved1 + ' slip' + (saved1 === 1 ? '' : 's') + ')',
-    'Photo 2 (' + saved2 + ' slip' + (saved2 === 1 ? '' : 's') + ')'
+    'Photo 1 (' + saved1 + ' paper' + (saved1 === 1 ? '' : 's') + ')',
+    'Photo 2 (' + saved2 + ' paper' + (saved2 === 1 ? '' : 's') + ')'
   ]);
   expect(await page.evaluate(leavingAsks)).toBe(false);
   expect(await page.evaluate(storedMetaIds)).toEqual(['lastPhoto', 'meta']);
@@ -1205,7 +1276,7 @@ test('a reload mid-photo and Stop reading keep every slip already read', async (
 
 // ---------------------------------------------------------------- test 4
 
-test('a much larger slip is asked about, and crops come from the full photo', async ({ page, context }) => {
+test('a much larger paper is asked about, and crops come from the full photo', async ({ page, context }) => {
   const big = bigPhoto();
   let cut = null; // the read that gets no answer the first time
   let retryHeld = false;
@@ -1229,7 +1300,7 @@ test('a much larger slip is asked about, and crops come from the full photo', as
   // the teacher answers, and the question count is locked meanwhile.
   await sendPhoto(page, 'big.png', big.png);
   await expect(page.locator('#photo-found')).toHaveText(
-    'Found 3 slips. One is much larger than the rest; if it is two slips side by side, retake the photo.');
+    'Found 3 papers. One is much larger than the rest; if it is two papers side by side, retake the photo.');
   await expect(page.locator('#photo-check')).toBeVisible();
   await expect(page.locator('#question-count')).toBeDisabled();
   await expect(page.locator('#count-locked')).toHaveText('The number of questions is locked while a photo is read.');
@@ -1244,19 +1315,19 @@ test('a much larger slip is asked about, and crops come from the full photo', as
   });
   await page.click('#read-anyway');
   await expect(page.locator('#photo-check')).toBeHidden();
-  await expect(page.locator('#photo-found')).toHaveText('Found 3 slips.');
+  await expect(page.locator('#photo-found')).toHaveText('Found 3 papers.');
 
   // ---- One read gets no answer at all; the wait line says so while its
   // retry is held.
   await expect.poll(() => mock.held.length).toBe(1);
   await expect(page.locator('#photo-wait')).toHaveText(
-    'No answer from Groq; check the connection. Trying slip 1 again in 1 s.');
+    'No answer from Groq; check the connection. Trying paper 1 again in 1 s.');
   mock.release();
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
   await expect(page.locator('#photo-wait')).toBeEmpty();
   await expect(page.locator('#results td.student')).toHaveText(big.ordered.map((t) => BIG_STUDENTS[t.student].name));
   await expect(page.locator('#photo-error')).toContainText(
-    'The number of questions changed from 4 to 3 while photo 1 was read, so its slips were graded on 4 questions.');
+    'The number of questions changed from 4 to 3 while photo 1 was read, so its papers were graded on 4 questions.');
   await expect(page.locator('#photo-error')).toContainText('Discard photo 1, then take it again to grade it on 3.');
   expect(readsIn(mock).filter((e) => e.crop === cut).map((e) => e.status)).toEqual([0, 200]);
 
@@ -1302,7 +1373,7 @@ test('a full page on a white stack, and a photo with no edges, are each read as 
   await setUp(page, ANSWER_KEY);
 
   await sendPhoto(page, 'quiz-on-stack.png', photos.stack);
-  await expect(page.locator('#photo-found')).toHaveText('Found 1 slip.');
+  await expect(page.locator('#photo-found')).toHaveText('Found 1 paper.');
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
   await expect(page.locator('#photo-error')).toBeHidden();
   await expect(page.locator('#results td.student')).toHaveText([STUDENTS[0].name]);
@@ -1415,14 +1486,14 @@ test('a storage connection lost mid-class is named in plain words, and Done says
   const status = page.locator('#done-status');
 
   await sendPhoto(page, 'trio.png', trio.png);
-  await expect(groups).toHaveText(['Photo 1 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 1 (3 papers)']);
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
   await expect(banner).toBeHidden();
   await expect(photoNote).toBeHidden();
 
   await breakStorage();
   await sendPhoto(page, 'trio.png', trio.png);
-  await expect(groups).toHaveText(['Photo 2 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 2 (3 papers)']);
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
   await expect(photoNote).toContainText('This browser stopped letting TABot save results.');
   await expect(photoNote).toContainText('finish with Done before closing or reloading it');
@@ -1449,7 +1520,7 @@ test('a storage connection lost mid-class is named in plain words, and Done says
 
   // ---- A reload with storage back: photo 1 returns, and Done finishes it.
   await page.reload();
-  await expect(groups).toHaveText(['Photo 1 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 1 (3 papers)']);
   await expect(page.locator('#results td.student')).toHaveText(namesOf(1));
   await expect(banner).toBeHidden();
   await expect(photoNote).toBeHidden();
@@ -1467,15 +1538,15 @@ test('a storage connection lost mid-class is named in plain words, and Done says
   // ---- Lost again, and back before Done: the file holds both photos, and
   // both are cleared.
   await sendPhoto(page, 'trio.png', trio.png);
-  await expect(groups).toHaveText(['Photo 1 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 1 (3 papers)']);
   await breakStorage();
   await sendPhoto(page, 'trio.png', trio.png);
-  await expect(groups).toHaveText(['Photo 2 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 2 (3 papers)']);
   await expect(unread).toBeVisible();
   await page.evaluate(() => { window.__tabotBreakStorage = false; });
   await page.click('#done');
   await expect(confirmText).toContainText('The spreadsheet for 6 students downloads, and then TABot asks whether it saved. Nothing is deleted');
-  await expect(groups).toHaveText(['Photo 1 (3 slips)', 'Photo 2 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 1 (3 papers)', 'Photo 2 (3 papers)']);
   await expect(photoNote).toContainText('This browser stopped letting TABot save results.');
   await expect(unread).toBeHidden();
   await expect(banner).toBeHidden();
@@ -1494,7 +1565,7 @@ test('a storage connection lost mid-class is named in plain words, and Done says
 
 // ---------------------------------------------------------------- test 8
 
-test('a key corrected while the first photo is read grades its slips on the corrected key', async ({ page, context }, testInfo) => {
+test('a key corrected while the first photo is read grades its papers on the corrected key', async ({ page, context }, testInfo) => {
   const trio = trioPhoto();
   // Every read is held until the test has corrected the key.
   let holding = true;
@@ -1629,7 +1700,7 @@ test('a photo read across a storage loss is not called interrupted once Done has
   const photoError = page.locator('#photo-error');
 
   await sendPhoto(page, 'trio.png', trio.png);
-  await expect(groups).toHaveText(['Photo 1 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 1 (3 papers)']);
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
 
   // ---- Photo 2's in-flight marker reaches IndexedDB, then storage goes:
@@ -1642,7 +1713,7 @@ test('a photo read across a storage loss is not called interrupted once Done has
   holding = false;
   mock.release();
   await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
-  await expect(groups).toHaveText(['Photo 2 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 2 (3 papers)']);
   await expect(page.locator('#photo-storage')).toContainText('This browser stopped letting TABot save results.');
   await expect(photoError).toBeHidden();
 
@@ -1662,7 +1733,7 @@ test('a photo read across a storage loss is not called interrupted once Done has
   await confirmSaved(page);
   await expect(page.locator('#done-status')).toHaveText('The results in the file are cleared from this browser. The ' +
     'results saved before the storage problem were not in the file and are still in this browser, to be finished with Done.');
-  await expect(groups).toHaveText(['Photo 1 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 1 (3 papers)']);
   await expect(page.locator('#results td.student')).toHaveText(namesOf(1));
   // Photo 1 is still in IndexedDB, and photo 2's in-flight marker is gone.
   expect(await page.evaluate(countStoredResults)).toEqual({ rows: 3, meta: 2 });
@@ -1671,7 +1742,7 @@ test('a photo read across a storage loss is not called interrupted once Done has
   // ---- The next load lists photo 1 and does not ask for photo 2 again: a
   // retake would put its students in a second spreadsheet.
   await page.reload();
-  await expect(groups).toHaveText(['Photo 1 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 1 (3 papers)']);
   await expect(page.locator('#results td.student')).toHaveText(namesOf(1));
   await expect.poll(() => page.evaluate(storedMetaIds)).toEqual(['lastPhoto', 'meta']);
   await expect(photoError).toBeHidden();
@@ -1680,13 +1751,13 @@ test('a photo read across a storage loss is not called interrupted once Done has
   // photo has every slip stored is cleared without a word...
   await page.evaluate(storeInFlight, { photoIndex: 0, total: 3, done: 1 });
   await page.reload();
-  await expect(groups).toHaveText(['Photo 1 (3 slips)']);
+  await expect(groups).toHaveText(['Photo 1 (3 papers)']);
   await expect.poll(() => page.evaluate(storedMetaIds)).toEqual(['lastPhoto', 'meta']);
   await expect(photoError).toBeHidden();
   // ...and one whose photo is missing slips is still named.
   await page.evaluate(storeInFlight, { photoIndex: 0, total: 4, done: 3 });
   await page.reload();
-  await expect(photoError).toContainText('Photo 1 was interrupted after 3 of 4 slips; take it again to read the rest.');
+  await expect(photoError).toContainText('Photo 1 was interrupted after 3 of 4 papers; take it again to read the rest.');
   await expect.poll(() => page.evaluate(storedMetaIds)).toEqual(['lastPhoto', 'meta']);
 
   await expectKeysOnlyInAuthorization(mock, seen, [KEY]);
@@ -1929,7 +2000,7 @@ test('results never confirmed saved are cleared 24 hours after the last photo', 
   await expect(check).toBeVisible();
   await page.click('#read-anyway');
   await ready();
-  await expect(photoHeads).toHaveText(['Photo 1 (3 slips)']);
+  await expect(photoHeads).toHaveText(['Photo 1 (3 papers)']);
   await expect(line).toHaveText(EXPIRED);
 
   // ---- A photo read before any check has run clears them first, so its
@@ -1943,7 +2014,7 @@ test('results never confirmed saved are cleared 24 hours after the last photo', 
   await sendPhoto(page, 'trio.png', trio.png);
   await expect(line).toHaveText(EXPIRED);
   await ready();
-  await expect(photoHeads).toHaveText(['Photo 1 (3 slips)']);
+  await expect(photoHeads).toHaveText(['Photo 1 (3 papers)']);
   await expect(rows).toHaveCount(3);
   expect(await page.evaluate(storedMetaIds)).toEqual(['lastPhoto', 'meta']);
   expect(readsIn(mock).every((e) => e.status === 200)).toBe(true);
@@ -1978,7 +2049,8 @@ test('each question matches by value or in exact form', async ({ page, context }
   await expect(match1).toHaveValue('value');
   await expect(match2).toHaveValue('value');
   await expect(page.locator('#match-hint')).toHaveText('Value: 1/2, 0.5 and 2/4 all count. Exact form: the answer ' +
-    'must be written the way the key is (6/8 does not count for 3/4).');
+    'must be written the way the key is (6/8 does not count for 3/4); it needs an answer typed here.');
+  await expect(page.locator('#key-optional')).toContainText('Answers are optional.');
 
   // ---- At 360 px the answer keeps most of the row, and every control is a
   // 44 px tap target.
@@ -2034,10 +2106,13 @@ test('each question matches by value or in exact form', async ({ page, context }
   expect(summary).toContainEqual(['Question', 'Hit rate %', 'Match']);
   expect(summary).toContainEqual(['Q1', 100, 'value']);
   expect(summary).toContainEqual(['Q2', 33.3, 'exact form']);
-  const roster = sheetRows(sheet.wb.Sheets.Roster, 8);
-  expect(roster[0]).toEqual(['Student', 'Score', 'Max', 'Percent', 'Q1', 'Q2', 'Flags', 'Notes']);
+  const roster = sheetRows(sheet.wb.Sheets.Roster, 9);
+  expect(roster[0]).toEqual(['Student', 'Score', 'Max', 'Percent', 'Q1', 'Q2', 'Flags', 'Analysis (AI)', 'Notes']);
   expect(roster.find((r) => r[0] === 'Sam Fixture')).toEqual(
-    ['Sam Fixture', 1, 2, 50, '6/8' + CHECK, '6/8' + CROSS + ' *', '*', 'Q2: reader 6/8, reviewer 3/4']);
+    // Sam's 6/8 was right by value when the paper was read, so no analysis
+    // was written for it then.
+    ['Sam Fixture', 1, 2, 50, '6/8' + CHECK, '6/8' + CROSS + ' *', '*', 'No AI analysis: this paper had no wrong answer when it was read.',
+      'Q2: reader 6/8, reviewer 3/4']);
 
   // ---- Back to value: regraded again, and the saved key has no setting left.
   // (A key change closes the question about the file.)
@@ -2121,7 +2196,7 @@ async function recordWakeLock(page) {
   });
 }
 
-test('the screen stays on while slips are read, and only then', async ({ page, context }) => {
+test('the screen stays on while papers are read, and only then', async ({ page, context }) => {
   const trio = trioPhoto();
   // Three slips, one much larger than the rest: the page asks about it.
   const big = bigPhoto();
@@ -2191,7 +2266,7 @@ test('the screen stays on while slips are read, and only then', async ({ page, c
   // ---- A photo with no slips in it is never read: nothing is asked for.
   holding = false;
   await sendPhoto(page, 'empty-table.png', blank);
-  await expect(page.locator('#photo-error')).toContainText('No slips found in this photo.');
+  await expect(page.locator('#photo-error')).toContainText('No papers found in this photo.');
   await ready();
   expect(await wakeLog()).toHaveLength(6);
 
@@ -2199,7 +2274,7 @@ test('the screen stays on while slips are read, and only then', async ({ page, c
   // released as it ends.
   refusing = true;
   await sendPhoto(page, 'trio.png', trio.png);
-  await expect(page.locator('#photo-error')).toContainText('3 of 3 slips could not be read');
+  await expect(page.locator('#photo-error')).toContainText('3 of 3 papers could not be read');
   await ready();
   await expect.poll(async () => (await wakeLog()).slice(6)).toEqual(['request screen', 'release']);
   expect(await heldLocks()).toBe(0);
@@ -2243,11 +2318,276 @@ test('the screen stays on while slips are read, and only then', async ({ page, c
   // Photos 2 and 3 were stopped or failed before a slip was saved, and the
   // photo with no slips and the one retaken took no number, so this is
   // photo 5.
-  await expect(page.locator('#results .photo-head h3').last()).toHaveText('Photo 5 (3 slips)');
+  await expect(page.locator('#results .photo-head h3').last()).toHaveText('Photo 5 (3 papers)');
   expect((await wakeLog()).slice(10)).toEqual(['request screen']);
   expect(await heldLocks()).toBe(0);
 
   expect(await page.evaluate(() => window.__tabotPermissionQueries)).toBe(0);
+  await expectKeysOnlyInAuthorization(mock, seen, [KEY]);
+  expectCleanRun(mock, seen);
+});
+
+// ---------------------------------------------------------------- no answer key
+
+// Three papers of one quiz, read with their printed questions: Q1 a
+// multiple choice (6 x 7), Q2 a multiplication worked in a grid (347 x 26),
+// Q3 a word problem code cannot work out. No answer key.
+const NK_QUESTIONS = [
+  { q: 1, text: 'Which is 6 x 7?', printed: true, expression: '6 x 7',
+    choices: [{ label: 'A', text: '36' }, { label: 'B', text: '42' }, { label: 'C', text: '48' }] },
+  { q: 2, text: 'Multiply. 347 x 26', printed: true, expression: '347 x 26', method: 'standard algorithm' },
+  { q: 3, text: 'Sam has 24 apples and gives away 9. How many are left?', printed: true, expression: '' }
+];
+const NK_STUDENTS = [
+  { name: 'Nia Fixture', answers: ['B', '9022', '15'] },
+  { name: 'Omar Fixture', answers: ['A', '9032', '15 apples'] },
+  { name: 'Pia Fixture', answers: ['B', '9,022', '12'] }
+];
+const NK_KEY = [['', '1'], ['', '2'], ['', '1']];
+
+function noKeyReply(model, student, pass) {
+  const answers = student.answers.map((answer, i) => ({ q: i + 1, answer, confidence: 0.95 }));
+  const questions = pass === 'reviewer'
+    ? NK_QUESTIONS.map((x) => ({ q: x.q, expression: x.expression }))
+    : NK_QUESTIONS;
+  return { status: 200, body: completion(model, JSON.stringify({
+    student_name: student.name, answers, questions, instructions: 'Show your work.', note: ''
+  })) };
+}
+
+test('with no answer key: worked out in code, solved by AI, analysed, and laid out as exemplars', async ({ page, context }, testInfo) => {
+  const trio = trioPhoto();
+  const studentOf = (crop) => NK_STUDENTS[trio.ordered[crop.slipIndex].student];
+  const solves = [];
+  const mock = createGroqMock((crop, model) => noKeyReply(model, studentOf(crop), crop.pass), {
+    solve: (body) => {
+      solves.push(body);
+      return solveReply(body.model, '15');
+    }
+  });
+  const seen = await guard(page, context, mock);
+  await page.goto('/index.html');
+  await setUp(page, NK_KEY);
+  await expect(page.locator('#q1-match')).toBeDisabled();
+
+  await sendPhoto(page, 'quiz.png', trio.png);
+  await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
+  await expect(page.locator('#photo-error')).toBeHidden();
+
+  // Q1 and Q2 were worked out in code; Q3 was solved by AI, once, twice over
+  // (two prompts that must agree), as text alone.
+  expect(solves).toHaveLength(2);
+  for (const body of solves) {
+    const user = body.messages.find((m) => m.role === 'user').content;
+    expect(typeof user).toBe('string');
+    expect(user).toContain('Sam has 24 apples and gives away 9. How many are left?');
+    expect(user).toContain('Instructions printed for the whole page: Show your work.');
+  }
+  expect(readsIn(mock)).toHaveLength(6);
+
+  const names = trio.ordered.map((t) => NK_STUDENTS[t.student].name);
+  const scoreOf = { 'Nia Fixture': '4/4', 'Omar Fixture': '1/4', 'Pia Fixture': '3/4' };
+  await expect(page.locator('#results td.student')).toHaveText(names);
+  await expect(page.locator('#results td.score')).toHaveText(names.map((n) => scoreOf[n]));
+  await expect(page.locator('#results td.flag')).toHaveText(names.map(() => '* Q3 AI-solved'));
+
+  // A blank key answer now shows what the class is graded against.
+  await expect(page.locator('#q1-answer')).toHaveAttribute('placeholder', 'B (42) (worked out)');
+  await expect(page.locator('#q2-answer')).toHaveAttribute('placeholder', '9022 (worked out)');
+  await expect(page.locator('#q3-answer')).toHaveAttribute('placeholder', '15 (AI, check)');
+
+  // Two papers had a wrong answer that was not blank; each was analysed once,
+  // on its reader crop, told the expected answer and code's worked steps.
+  const analyses = mock.log.filter((e) => e.kind === 'analysis');
+  expect(analyses.map((e) => studentOf(e.crop).name).sort()).toEqual(['Omar Fixture', 'Pia Fixture']);
+  for (const e of analyses) expect(e.crop.pass).toBe('reader');
+  const omar = analyses.find((e) => studentOf(e.crop).name === 'Omar Fixture');
+  const omarText = JSON.parse(omar.body).messages.find((m) => m.role === 'user').content.find((p) => p.type === 'text').text;
+  expect(omarText).toContain('Q2: Multiply. 347 x 26. Expected answer: 9022 (worked out by code).');
+  expect(omarText).toContain('Correct steps: 347 ' + String.fromCharCode(0xd7) + ' 6 = 2082');
+  expect(omarText).toContain("The student's final answer, as read: 9032.");
+
+  // An edit to the key that changes no expected answer keeps every analysis
+  // and every AI answer.
+  await page.fill('#assignment', 'Unit 5 quiz');
+  await page.click('#done');
+  const sheet = await downloadSheet(page, testInfo);
+  expect(sheet.wb.SheetNames).toEqual(['Roster', 'Summary', 'Exemplars']);
+
+  const roster = sheetRows(sheet.wb.Sheets.Roster, 10);
+  expect(roster[0]).toEqual(['Student', 'Score', 'Max', 'Percent', 'Q1', 'Q2', 'Q3', 'Flags', 'Analysis (AI)', 'Notes']);
+  const rowOf = (name) => roster.find((r) => r[0] === name);
+  expect(rowOf('Nia Fixture').slice(1, 9)).toEqual([4, 4, 100, 'B' + CHECK, '9022' + CHECK, '15' + CHECK + ' *', '*',
+    'Every graded answer matches the expected answer. Q3 was checked against an AI-solved answer.']);
+  expect(rowOf('Omar Fixture').slice(1, 9)).toEqual([1, 4, 25, 'A' + CROSS, '9032' + CROSS, '15 apples' + CHECK + ' *', '*',
+    'Mock analysis: the work goes wrong on Q1, Q2.']);
+  expect(rowOf('Pia Fixture').slice(1, 9)).toEqual([3, 4, 75, 'B' + CHECK, '9,022' + CHECK, '12' + CROSS + ' *', '*',
+    'Mock analysis: the work goes wrong on Q3.']);
+  for (const name of names) expect(rowOf(name)[9]).toContain('AI-solved, check: Q3');
+
+  const summary = sheetRows(sheet.wb.Sheets.Summary, 6);
+  const at = summary.findIndex((r) => r[0] === 'Question');
+  expect(summary[at]).toEqual(['Question', 'Hit rate %', 'Match', 'Expected answer', 'Answer from', 'Printed question as read']);
+  expect(summary.slice(at + 1, at + 4)).toEqual([
+    ['Q1', 66.7, 'value', 'B (42)', 'worked out by code', '6 x 7 (read this way on 3 of 3 papers)'],
+    ['Q2', 66.7, 'value', '9022', 'worked out by code', '347 x 26 (read this way on 3 of 3 papers)'],
+    ['Q3', 66.7, 'value', '15', 'AI-solved, check', 'Sam has 24 apples and gives away 9. How many are left?']
+  ]);
+  expect(summary.some((r) => /^AI-solved, check: Q3\. /.test(r[0]))).toBe(true);
+  const p = summary.findIndex((r) => r[0] === 'Common error patterns (AI observations)');
+  expect(summary[p + 1].slice(0, 3)).toEqual(['addition', 2, 'Q1, Q2, Q3']);
+
+  const ex = sheetRows(sheet.wb.Sheets.Exemplars, 8);
+  const q2 = ex.findIndex((r) => r[0] === 'Q2');
+  expect(ex[q2 + 1].slice(0, 2)).toEqual(['Question', '347 ' + String.fromCharCode(0xd7) + ' 26  read this way on 3 of 3 papers']);
+  expect(ex[q2 + 2].slice(0, 2)).toEqual(['Method', 'standard algorithm (as read by AI on 3 of 3 papers)']);
+  const top = ex.findIndex((r, i) => i > q2 && r[3] === '3' && r[4] === '4' && r[5] === '7');
+  expect(ex[top + 4].slice(1, 6)).toEqual(['=', '9', '0', '2', '2']);
+  expect(ex.find((r) => r[0] === 'Q3')[1]).toMatch(/^No worked example: The question is not arithmetic/);
+  expect(ex.some((r) => r[2] === 'The choice that matches is B (42).')).toBe(true);
+
+  await expectKeysOnlyInAuthorization(mock, seen, [KEY]);
+  expectCleanRun(mock, seen);
+});
+
+test('two AI solves that disagree leave the question ungraded, and Stop during the analyses says so', async ({ page, context }, testInfo) => {
+  const trio = trioPhoto();
+  const studentOf = (crop) => NK_STUDENTS[trio.ordered[crop.slipIndex].student];
+  let variant = 0;
+  let holdAnalyses = true;
+  const mock = createGroqMock((crop, model) => noKeyReply(model, studentOf(crop), crop.pass), {
+    solve: (body) => solveReply(body.model, variant++ === 0 ? '15' : '33'),
+    analysis: (crop, body, entry) => (holdAnalyses ? mock.hold(entry, () => defaultAnalysis(crop, body)) : defaultAnalysis(crop, body))
+  });
+  const seen = await guard(page, context, mock);
+  await page.goto('/index.html');
+  await setUp(page, NK_KEY);
+
+  await sendPhoto(page, 'quiz.png', trio.png);
+  // Only Omar's paper has a wrong answer that is not blank once Q3 is left
+  // ungraded; its analysis is held, then Stop reading ends it.
+  await expect.poll(() => mock.held.length).toBe(1);
+  await expect(page.locator('#photo-progress')).toHaveText('Writing analyses: 0/1');
+  await page.click('#stop-reading');
+  await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
+  holdAnalyses = false;
+  mock.release();
+
+  const names = trio.ordered.map((t) => NK_STUDENTS[t.student].name);
+  const scoreOf = { 'Nia Fixture': '3/3', 'Omar Fixture': '0/3', 'Pia Fixture': '3/3' };
+  await expect(page.locator('#results td.score')).toHaveText(names.map((n) => scoreOf[n]));
+  await expect(page.locator('#results td.flag')).toHaveText(names.map(() => 'Q3 not graded'));
+  await expect(page.locator('#q3-answer')).toHaveAttribute('placeholder', 'not graded');
+  await expect(page.locator('#q3-answer')).toHaveAttribute('title', 'The two AI solves disagree, so it was not graded. Type the answer in step 2.');
+
+  await page.click('#done');
+  const sheet = await downloadSheet(page, testInfo);
+  const roster = sheetRows(sheet.wb.Sheets.Roster, 10);
+  const omar = roster.find((r) => r[0] === 'Omar Fixture');
+  expect(omar[6]).toBe('15 apples (not graded)');
+  expect(omar[8]).toBe('Analysis not written: reading was stopped.');
+  const summary = sheetRows(sheet.wb.Sheets.Summary, 6);
+  expect(summary.find((r) => r[0] === 'Q3')).toEqual(['Q3', 'not graded', '', '', 'not graded',
+    'Sam has 24 apples and gives away 9. How many are left?']);
+  const why = summary.findIndex((r) => r[0] === 'Not graded');
+  expect(summary[why + 1][0]).toBe('Q3: The two AI solves disagree, so it was not graded. Type the answer in step 2.');
+
+  // Typing the answer grades Q3 on the key at once. A key compares as it
+  // always has: "15 apples" is not "15" (a word that is not a unit is text).
+  await page.fill('#q3-answer', '15');
+  await expect(page.locator('#results td.score')).toHaveText(names.map((n) => ({ 'Nia Fixture': '4/4', 'Omar Fixture': '0/4', 'Pia Fixture': '3/4' })[n]));
+
+  await expectKeysOnlyInAuthorization(mock, seen, [KEY]);
+  expectCleanRun(mock, seen);
+});
+
+// ---------------------------------------------------------------- daily limits
+
+const DAILY = 'Rate limit reached for model on requests per day (RPD): Limit 1000, Used 1000. Please try again in 1m26s.';
+
+test('a daily limit on one model moves on to the next; on every model the photo stops and names what was not read', async ({ page, context }) => {
+  const trio = trioPhoto();
+  const studentOf = (crop) => STUDENTS[trio.ordered[crop.slipIndex].student];
+  let everyModel = false;
+  let answered = 0;
+  const mock = createGroqMock((crop, model) => {
+    if (model === ALPHA || (everyModel && answered >= 2)) return errorReply(429, DAILY, 'tokens');
+    answered++;
+    return readingReply(model, studentOf(crop), crop.pass);
+  });
+  const seen = await guard(page, context, mock);
+  await page.goto('/index.html');
+  await setUp(page, ANSWER_KEY);
+  await page.selectOption('#model', ALPHA);
+
+  // Alpha has used its day; every read goes on to Beta at once, with no
+  // backoff and no message.
+  await sendPhoto(page, 'trio.png', trio.png);
+  await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
+  await expect(page.locator('#photo-error')).toBeHidden();
+  await expect(page.locator('#results tbody tr')).toHaveCount(3);
+  const alphaReads = readsIn(mock).filter((e) => e.model === ALPHA);
+  expect(alphaReads.every((e) => e.status === 429)).toBe(true);
+  expect(readsIn(mock).filter((e) => e.model === BETA && e.status === 200)).toHaveLength(6);
+
+  // Now Beta is used up too, after one paper's two reads: the photo stops,
+  // and says which papers to photograph again.
+  everyModel = true;
+  answered = 0;
+  await sendPhoto(page, 'trio.png', trio.png);
+  await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
+  const error = page.locator('#photo-error');
+  await expect(error).toContainText("Groq's daily limit is used up for every model this key can use, so photo 2 was not fully read.");
+  await expect(error).toContainText('Papers read before that are saved below.');
+  await expect(error).toContainText('Not read: papers ');
+  await expect(error).toContainText('photograph just those papers, or discard photo 2 and take it again.');
+  await expect(page.locator('#results tbody tr')).toHaveCount(4);
+
+  await expectKeysOnlyInAuthorization(mock, seen, [KEY]);
+  expectCleanRun(mock, seen);
+});
+
+test('Exact form waits while its answer is blank, and is still set when the answer is typed again', async ({ page, context }) => {
+  const mock = createGroqMock(() => errorReply(500, 'not used'));
+  const seen = await guard(page, context, mock);
+  await page.goto('/index.html');
+  await setUp(page, SHORT_KEY);
+  await page.selectOption('#q1-match', 'exact');
+  await page.fill('#q1-answer', '');
+  await expect(page.locator('#q1-match')).toBeDisabled();
+  await expect(page.locator('#q1-match')).toHaveValue('exact');
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('tabot.answerKey')).questions[0]);
+  expect(saved.match).toBeUndefined();
+  await page.fill('#q1-answer', '3/4');
+  await expect(page.locator('#q1-match')).toBeEnabled();
+  await expect(page.locator('#q1-match')).toHaveValue('exact');
+  const again = await page.evaluate(() => JSON.parse(localStorage.getItem('tabot.answerKey')).questions[0]);
+  expect(again).toEqual({ answer: '3/4', points: 1, match: 'exact' });
+  expectCleanRun(mock, seen);
+});
+
+test('page instructions about form reach the AI answer: simplest form grades 6/16 wrong', async ({ page, context }) => {
+  const trio = trioPhoto();
+  const answersFor = [['3/8'], ['6/16'], ['3/8']];
+  const question = [{ q: 1, text: 'Half of the 3/4 cup is used. How much is used?', printed: true, expression: '' }];
+  const mock = createGroqMock((crop, model) => {
+    const i = trio.ordered[crop.slipIndex].student;
+    return { status: 200, body: completion(model, JSON.stringify({
+      student_name: 'Paper ' + i, answers: [{ q: 1, answer: answersFor[i][0], confidence: 0.95 }],
+      questions: crop.pass === 'reviewer' ? [{ q: 1, expression: '' }] : question,
+      instructions: 'Write fractions in simplest form.', note: ''
+    })) };
+  }, { solve: (body) => solveReply(body.model, '3/8') });
+  const seen = await guard(page, context, mock);
+  await page.goto('/index.html');
+  await setUp(page, [['', '1']]);
+  await sendPhoto(page, 'cups.png', trio.png);
+  await expect(page.locator('#photo-progress')).toHaveText('Ready for the next photo.');
+  const names = trio.ordered.map((t) => 'Paper ' + t.student);
+  const scoreOf = { 'Paper 0': '1/1', 'Paper 1': '0/1', 'Paper 2': '1/1' };
+  await expect(page.locator('#results td.student')).toHaveText(names.map((n) => n));
+  await expect(page.locator('#results td.score')).toHaveText(names.map((n) => scoreOf[n]));
+  await expect(page.locator('#q1-answer')).toHaveAttribute('placeholder', '3/8 (AI, check)');
   await expectKeysOnlyInAuthorization(mock, seen, [KEY]);
   expectCleanRun(mock, seen);
 });

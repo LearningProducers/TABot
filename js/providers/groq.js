@@ -38,7 +38,7 @@
   var NO_IMAGE_PATTERN = /\bimages?\b|image[ _-]?(?:url|input)|content[ _-]?type|content must be a string|multi[ -]?modal|modalit/i;
   var INVALID_JSON_CODE = 'json_validate_failed';
   var MAX_DETAIL_CHARS = 500;
-  var DEFAULT_READ_MAX_TOKENS = 2000;
+  var DEFAULT_READ_MAX_TOKENS = 4000;
 
   class ProviderError extends Error {
     constructor(message, fields) {
@@ -302,19 +302,22 @@
     return NO_IMAGE_PATTERN.test(withoutId);
   }
 
-  // One slip image in, the model's raw text out (JSON mode, temperature 0).
-  // max_tokens defaults to 2000: a 30-question slip is more JSON than 800
-  // tokens. No reasoning parameters: Groq's vision model, measured on
-  // 2026-09-21, emits no reasoning tokens by default.
+  // One paper image in, the model's raw text out (JSON mode, temperature 0).
+  // max_tokens defaults to 4000: a 30-question test, with each question's
+  // printed text beside the answer, is more JSON than 2000 tokens. No
+  // reasoning parameters: Groq's vision model, measured on 2026-09-21, emits
+  // no reasoning tokens by default. opts.textOnly sends the user text with no
+  // image (imageDataUrl is then not taken).
   async function read(opts) {
     opts = opts || {};
     requireString(opts.model, 'model');
-    requireString(opts.imageDataUrl, 'imageDataUrl');
+    if (!opts.textOnly) requireString(opts.imageDataUrl, 'imageDataUrl');
     var messages = [];
     if (opts.system) messages.push({ role: 'system', content: String(opts.system) });
     messages.push({
       role: 'user',
-      content: [imagePart(opts.imageDataUrl), { type: 'text', text: String(opts.user || '') }]
+      content: opts.textOnly ? String(opts.user || '')
+        : [imagePart(opts.imageDataUrl), { type: 'text', text: String(opts.user || '') }]
     });
     var res = await request({
       key: opts.key,

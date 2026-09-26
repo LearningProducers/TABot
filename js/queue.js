@@ -20,10 +20,11 @@
 // keeps its slot until it settles (pass the same signal to the request so
 // it settles at once); a waiting or sleeping task gives its slot up at once.
 //
-// onRetry({attempt, status, kind, delayMs}) is called before each backoff
+// onRetry({attempt, status, kind, delayMs, daily}) is called before each backoff
 // sleep, from the queue options and from run's options: attempt is the
 // number of tries made so far (1 after the first failure), status the
-// failed try's status, kind one of the kinds above, delayMs the wait.
+// failed try's status, kind one of the kinds above, delayMs the wait, and
+// daily true only on a 429 whose text names a limit per day.
 (function (root, factory) {
   var api = factory(root);
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -76,6 +77,9 @@
   }
 
   // -> the retry kind of a failure, or null when it must not be retried.
+  // Groq names a daily cap in its 429 text: "(RPD)", "(TPD)", "per day".
+  var DAILY_RE = /\(RPD\)|\(TPD\)|per day|requests per day|tokens per day/i;
+
   function retryKind(err) {
     if (!err || isAbortError(err) || typeof err.status !== 'number') return null;
     var status = err.status;
@@ -139,8 +143,13 @@
           else counts.retriesOther++;
           var delayMs = backoffDelay(tries - 1, delayOpts);
           var info = { attempt: tries, status: err.status, kind: kind, delayMs: delayMs };
+          // A limit per day never clears in a backoff; the caller moves on.
+          if (kind === 'rate_limit' && DAILY_RE.test(String(err.message || ''))) info.daily = true;
           callQuietly(onRetry, info);
           callQuietly(job.onRetry, info);
+          // A callback that aborted the task frees its slot now, not after
+          // the backoff.
+          if (job.settled) throw abortError();
           await pause(job, delayMs);
         }
       }

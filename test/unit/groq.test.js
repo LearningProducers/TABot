@@ -149,7 +149,7 @@ test('read: POST /chat/completions in JSON mode, temperature 0, one image', asyn
       ] }
     ],
     temperature: 0,
-    max_tokens: 2000,
+    max_tokens: 4000,
     response_format: { type: 'json_object' }
   });
   assert.deepEqual(out, {
@@ -158,6 +158,18 @@ test('read: POST /chat/completions in JSON mode, temperature 0, one image', asyn
     usage: { prompt_tokens: 2100, completion_tokens: 40, total_tokens: 2140 },
     finishReason: 'stop'
   });
+});
+
+test('read: textOnly sends the user text alone, with no image, in JSON mode', async () => {
+  const { fetch, calls } = fakeFetch(() => chatOk('{"answer":"42"}'));
+  const out = await groq.read({ key: KEY, fetch, model: 'm', textOnly: true, system: 'SYS', user: 'USER' });
+  assertKeyOnlyInAuthorization(calls[0]);
+  assert.deepEqual(calls[0].body.messages, [
+    { role: 'system', content: 'SYS' },
+    { role: 'user', content: 'USER' }
+  ]);
+  assert.deepEqual(calls[0].body.response_format, { type: 'json_object' });
+  assert.equal(out.text, '{"answer":"42"}');
 });
 
 test('read: maxTokens is passed through', async () => {

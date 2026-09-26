@@ -2,7 +2,7 @@
   "name": "tabot",
   "version": "0.1.0",
   "private": true,
-  "description": "TABot: one static web page that reads math exit slips from photos and returns one spreadsheet.",
+  "description": "TABot: one static web page that reads photographed student math work (exit slips, homework, quizzes and tests) and returns one spreadsheet.",
   "license": "MIT",
   "scripts": {
     "test": "npm run test:unit && npm run test:e2e",
