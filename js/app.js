@@ -34,10 +34,10 @@
   var SECOND_READ_MODE = 'single-model';
 
   var CAPTURE_TIPS = [
-    'Lay the slips on a dark or colored surface, not a white or pale table.',
-    'Keep every slip fully inside the frame.',
+    'Lay the papers on a dark or colored surface, not a white or pale table.',
+    'Keep every paper fully inside the frame.',
     'Shoot straight down, in good and even light.',
-    'Leave a gap of surface between slips.'
+    'Leave a gap of surface between papers.'
   ];
 
   var ELEMENT_IDS = [
@@ -365,7 +365,7 @@
       };
     }
     return {
-      title: 'None of the models this key can use reads images right now, so TABot cannot read slips with it.',
+      title: 'None of the models this key can use reads images right now, so TABot cannot read papers with it.',
       items: ['Groq adds and retires models over time. Press Check key again on another day.']
     };
   }
@@ -419,6 +419,7 @@
     }
     el.questionRows.textContent = '';
     el.questionRows.appendChild(rows);
+    syncMatchLocks();
   }
 
   function questionRow(n, q) {
@@ -472,25 +473,70 @@
       passPercent: Math.min(100, Math.max(0, numberOr(el.passPercent.value, DEFAULT_PASS))),
       questions: questionInputs().map(function (q) {
         var points = numberOr(q.points.value, 1);
-        return { answer: q.answer.value.trim(), points: points >= 0 ? points : 1, match: matchOf({ match: q.match.value }) };
+        var answer = q.answer.value.trim();
+        // The setting waits, unchanged, while its answer is blank; a blank
+        // answer is graded by value (settle.js) and saved as value.
+        return { answer: answer, points: points >= 0 ? points : 1, match: answer ? matchOf({ match: q.match.value }) : 'value' };
       })
     };
   }
 
-  // A blank answer could never be matched, so the key is not usable until
-  // every question has one.
+  // Answers are optional: a question with no key answer is graded against
+  // what TABot works out from the printed question (settle.js). Only the
+  // number of questions is needed.
   function answerKeyProblem(key) {
     if (!key.questions.length) return 'Set the number of questions in step 2.';
-    for (var i = 0; i < key.questions.length; i++) {
-      if (!key.questions[i].answer) return 'Fill in the answer to Q' + (i + 1) + ' in step 2.';
-    }
     return null;
+  }
+
+  // Exact form compares with the form the key is written in, so it needs a
+  // key answer: the setting is off while the answer is blank.
+  function syncMatchLocks() {
+    questionInputs().forEach(function (q) {
+      var blank = !q.answer.value.trim();
+      q.match.disabled = blank;
+      q.match.title = blank ? 'Exact form needs an answer typed here.' : '';
+    });
+  }
+
+  // A blank key answer shows what the class is graded against, once papers
+  // are read: the worked-out answer, the AI's answer (to check), or why
+  // there is none.
+  function showExpected(settled) {
+    var inputs = questionInputs();
+    inputs.forEach(function (input, i) {
+      var sq = settled && settled.questions[i];
+      var text = '';
+      if (sq && sq.source === 'computed') {
+        text = expectedOf(i + 1) + ' (worked out)';
+      } else if (sq && sq.source === 'ai') {
+        text = expectedOf(i + 1) + ' (AI, check)';
+      } else if (sq && sq.source === 'none' && state.rows.length) {
+        text = 'not graded';
+      }
+      input.answer.placeholder = text;
+      input.answer.title = sq && sq.source === 'none' && sq.reason ? sq.reason : '';
+    });
+  }
+
+  // The expected answer most stored rows show for question q.
+  function expectedOf(q) {
+    var counts = {}, best = '', most = 0;
+    state.rows.forEach(function (row) {
+      var a = row.answers && row.answers[q - 1];
+      var e = a && a.graded !== false ? String(a.expected || '') : '';
+      if (!e) return;
+      counts[e] = (counts[e] || 0) + 1;
+      if (counts[e] > most) { most = counts[e]; best = e; }
+    });
+    return best;
   }
 
   // A change to the answer key while "Did the file save?" is open closes the
   // question: the file holds the marks, name and pass mark from before the
   // change, so clearing the results now would keep only an out-of-date copy.
   function onAnswerKeyInput() {
+    syncMatchLocks();
     store.setAnswerKey(readAnswerKey());
     tellStorage(el.keyStorage);
     if (state.saveCheck) {
@@ -539,15 +585,8 @@
     return serial(async function () {
       try {
         var key = readAnswerKey();
-        if (answerKeyProblem(key)) return; // a half-typed key keeps the last good marks
-        var rows = await store.allRows();
-        var updated = rows.filter(function (row) {
-          return row.reading && Array.isArray(row.answers) && row.answers.length === key.questions.length;
-        }).map(function (row) { return buildRow(key, row); });
-        if (!updated.length) return;
-        // A regrade stores no new slip, so the time of the last photo stays.
-        await store.addRows(updated, { regrade: true });
-        await refreshRows();
+        if (answerKeyProblem(key)) return;
+        await regradeAll(key);
       } finally {
         // A regrade follows an edit to the answer key.
         tellStorage(el.keyStorage);
@@ -671,11 +710,14 @@
       photoIndex: null,
       controller: controller,
       signal: controller.signal,
-      stopped: null,   // {reason: 'teacher' | 'key' | 'error', error}
+      stopped: null,   // {reason: 'teacher' | 'key' | 'limit' | 'error', error}
       total: 0,
       saved: 0,
       modelGone: false,
-      failure: null
+      failure: null,
+      unsolved: [],    // {q, why} for questions whose AI answer could not be had this time
+      unanalyzed: 0,   // papers left without an analysis
+      exhausted: {}    // models whose daily limit was reached in this photo
     };
     setText(el.photoProgress, 'Opening the photo...');
     var cut = await cutPhoto(chosen);
@@ -683,7 +725,7 @@
     // The count shows before anything is read, so the teacher can hold it
     // against the stack.
     var found = cut.whole ? 'No paper edges found, so the whole photo is read as one paper.'
-      : 'Found ' + plural(cut.crops.length, 'slip', 'slips') + '.';
+      : 'Found ' + plural(cut.crops.length, 'paper', 'papers') + '.';
     setText(el.photoFound, found);
     var concern = slipConcern(cut.slips);
     if (concern) {
@@ -692,7 +734,7 @@
       var choice = await askAboutSlips();
       if (choice !== 'read') {
         cut = null;
-        setText(el.photoFound, 'Photo set aside; nothing was read. Take it again once the slips are spread out.');
+        setText(el.photoFound, 'Photo set aside; nothing was read. Take it again once the papers are spread out.');
         return;
       }
       setText(el.photoFound, found);
@@ -715,6 +757,11 @@
       await store.setInFlight({ photoIndex: job.photoIndex, total: job.total, done: 0 });
       tellStorage(el.photoStorage);
       results = await readAll(job, cut.crops);
+      await finishPhoto(job, cut.crops, results);
+    } catch (err) {
+      if (!job.stopped) job.stopped = { reason: 'error', error: err };
+      if (job.photoIndex !== null) await markUnfinished(job).catch(function () {});
+      throw err;
     } finally {
       cut = null;
       state.job = null;
@@ -737,12 +784,12 @@
     var large = count('large');
     var parts = [];
     if (touching) {
-      parts.push(touching === 1 ? 'One looks like two slips touching.'
-        : touching + ' of them look like two slips touching.');
+      parts.push(touching === 1 ? 'One looks like two papers touching.'
+        : touching + ' of them look like two papers touching.');
     }
     if (large) {
-      parts.push(large === 1 ? 'One is much larger than the rest; if it is two slips side by side, retake the photo.'
-        : large + ' of them are much larger than the rest; if any is two slips side by side, retake the photo.');
+      parts.push(large === 1 ? 'One is much larger than the rest; if it is two papers side by side, retake the photo.'
+        : large + ' of them are much larger than the rest; if any is two papers side by side, retake the photo.');
     }
     return parts.join(' ');
   }
@@ -751,8 +798,8 @@
   function askAboutSlips() {
     return new Promise(function (resolve) {
       state.asking = resolve;
-      setText(el.photoCheckText, 'Count the slips in the photo. Read anyway if the count is right; ' +
-        'retake if it is short, with a gap of surface around each slip.');
+      setText(el.photoCheckText, 'Count the papers in the photo. Read anyway if the count is right; ' +
+        'retake if it is short, with a gap of surface around each paper.');
       el.photoCheck.hidden = false;
       updateReadiness();
       el.retake.focus();
@@ -796,7 +843,7 @@
       } finally {
         releaseCanvas(analysis);
       }
-      if (!found.slips.length) throw problem('No slips found in this photo.', CAPTURE_TIPS);
+      if (!found.slips.length) throw problem('No papers found in this photo.', CAPTURE_TIPS);
 
       // A photo read whole is cut at its own edges, with no pad of surface.
       var scale = photo.width / analysisWidth;
@@ -963,7 +1010,8 @@
       readPass(job, slipIndex, 'reader', crop.reader).then(counted),
       readPass(job, slipIndex, 'reviewer', crop.reviewer).then(counted)
     ]);
-    crop.reader = null;
+    // The reader's crop is kept for the analysis (finishPhoto); the enhanced
+    // copy is done with.
     crop.reviewer = null;
     var result = { slipIndex: slipIndex, reader: reads[0], reviewer: reads[1], saved: false };
     // Finished: the reader read it, and the second read ended on its own
@@ -976,14 +1024,18 @@
     return result;
   }
 
-  // The slip is graded when its turn on the store chain comes, on the answer
-  // key as it stands then (gradingKey). The in-flight marker counts the slips
-  // stored so far, so a reload or a closed tab can say which photo was cut
-  // short and after how many slips.
+  // The paper is graded when its turn on the store chain comes, on the
+  // answer key as it stands then (gradingKey), against the class as stored
+  // so far plus this paper (settle.js). The rest of the class is graded
+  // again once the photo's reads end (finishPhoto), when every paper of the
+  // photo has had its say. The in-flight marker counts the papers stored so
+  // far, so a reload or a closed tab can say which photo was cut short and
+  // after how many papers.
   function saveSlip(job, result) {
     return serial(async function () {
       try {
-        await store.addRows([slipRow(job, result)]);
+        var stored = await store.allRows();
+        await store.addRows([slipRow(job, result, stored)]);
         job.saved++;
         await store.setInFlight({ photoIndex: job.photoIndex, total: job.total, done: job.saved });
         await refreshRows();
@@ -999,52 +1051,103 @@
     if (testHook && typeof testHook.onCrop === 'function') {
       await testHook.onCrop(job.photoIndex, slipIndex, pass, imageDataUrl);
     }
+    var messages = job.messages[pass];
+    var out = await askModels(job, {
+      label: 'paper ' + (slipIndex + 1),
+      image: imageDataUrl,
+      system: messages.system,
+      user: messages.user,
+      maxTokens: messages.maxTokens,
+      parse: function (text) {
+        var r = T.prompt.parseReading(text, job.questionCount);
+        return r.ok ? { ok: true, value: r.reading } : r;
+      }
+    });
+    if (out.ok) return { ok: true, reading: out.value, model: out.model };
+    return out;
+  }
+
+  // Walks the ranked models until one returns a reply request.parse accepts.
+  // Never rejects for a provider answer or a stop; the result says what
+  // happened: {ok, value, model}, {ok: false, error} or {ok: false, aborted}.
+  async function askModels(job, request) {
     var lastError = null;
     for (var i = 0; i < job.models.length; i++) {
       if (job.stopped) break;
-      var attempt = await readWithModel(job, job.models[i], slipIndex, pass, imageDataUrl);
+      if (job.exhausted[job.models[i]]) continue;
+      var attempt = await callModel(job, job.models[i], request);
       if (attempt.ok || attempt.aborted) return attempt;
       lastError = attempt.error;
+    }
+    if (!job.stopped && job.models.length && job.models.every(function (m) { return job.exhausted[m]; })) {
+      stopJob(job, 'limit');
     }
     if (job.stopped) return { ok: false, aborted: true, error: job.stopped.error };
     return { ok: false, error: lastError || new Error('there was no model to read it with') };
   }
 
-  // One model's try at one image. The queue retries 429, 5xx, network errors
-  // and timeouts, reporting each wait; any other error, or a reply that is
-  // not the expected JSON, sends the image on to the next model. A 401 stops
-  // every read of this photo, and so does Stop reading (an AbortError).
-  async function readWithModel(job, model, slipIndex, pass, imageDataUrl) {
-    var messages = job.messages[pass];
+  // One model's try at one request: a paper image with its prompt, or text
+  // alone (request.image unset). The queue retries 429, 5xx, network errors
+  // and timeouts, reporting each wait; any other error, or a reply
+  // request.parse refuses, sends it on to the next model. A 401 stops every
+  // call of this photo, and so do a daily limit, and Stop reading (an
+  // AbortError).
+  // A 429 that names a daily limit fails this model at once (no backoff can
+  // clear it) and marks it used up for the rest of the photo; the next model
+  // is asked. The photo stops only when every model is used up (askModels).
+  async function callModel(job, model, request) {
     var waitToken = {};
+    var call = new AbortController();
+    var passOn = function () { call.abort(); };
+    job.signal.addEventListener('abort', passOn);
+    var daily = false;
     try {
       var res = await queue.run(function () {
         return provider.read({
           key: job.key,
           model: model,
-          imageDataUrl: imageDataUrl,
-          system: messages.system,
-          user: messages.user,
-          signal: job.signal
+          imageDataUrl: request.image,
+          textOnly: !request.image,
+          system: request.system,
+          user: request.user,
+          maxTokens: request.maxTokens,
+          signal: call.signal
         });
       }, {
-        signal: job.signal,
-        onRetry: function (info) { showWait(job, waitToken, waitText(info, slipIndex)); }
+        signal: call.signal,
+        onRetry: function (info) {
+          if (info.daily) {
+            daily = true;
+            job.exhausted[model] = true;
+            call.abort();
+            return;
+          }
+          showWait(job, waitToken, waitText(info, request.label));
+        }
       });
-      var parsed = T.prompt.parseReading(res.text, job.questionCount);
-      if (parsed.ok) return { ok: true, reading: parsed.reading, model: res.model || model };
+      var parsed = request.parse(res.text);
+      if (parsed.ok) return { ok: true, value: parsed.value, model: res.model || model };
       var bad = new Error(res.finishReason === 'length'
         ? 'the model\'s reply was cut off before it finished'
         : 'the model\'s reply was not in the expected form');
       bad.kind = 'reply';
       return { ok: false, error: bad };
     } catch (err) {
-      if (T.queue.isAbortError(err)) return { ok: false, aborted: true, error: err };
+      if (T.queue.isAbortError(err)) {
+        if (daily && !job.stopped) {
+          var used = new Error('Groq\'s daily limit for this model is used up');
+          used.status = 429;
+          used.daily = true;
+          return { ok: false, error: used };
+        }
+        return { ok: false, aborted: true, error: err };
+      }
       if (!isProviderError(err)) throw err;
       if (modelGone(err, model)) job.modelGone = true;
       if (err.status === 401) stopJob(job, 'key', err);
       return { ok: false, error: err };
     } finally {
+      job.signal.removeEventListener('abort', passOn);
       clearWait(waitToken);
     }
   }
@@ -1134,16 +1237,16 @@
     }
   }
 
-  // The wait line: what the queue is waiting on right now, and for which slip.
-  function waitText(info, slipIndex) {
+  // The wait line: what the queue is waiting on right now, and for what
+  // ("paper 3", "the answer to Q4", "the analysis of paper 3").
+  function waitText(info, label) {
     var seconds = Math.max(1, Math.round(info.delayMs / 1000));
-    var slip = 'slip ' + (slipIndex + 1);
-    if (info.kind === 'rate_limit') return 'Groq is busy; waiting ' + seconds + ' s before retrying ' + slip + '.';
-    if (info.kind === 'server') return 'Groq is having trouble; waiting ' + seconds + ' s before retrying ' + slip + '.';
+    if (info.kind === 'rate_limit') return 'Groq is busy; waiting ' + seconds + ' s before retrying ' + label + '.';
+    if (info.kind === 'server') return 'Groq is having trouble; waiting ' + seconds + ' s before retrying ' + label + '.';
     if (info.kind === 'timeout' || info.kind === 'network') {
-      return 'No answer from Groq; check the connection. Trying ' + slip + ' again in ' + seconds + ' s.';
+      return 'No answer from Groq; check the connection. Trying ' + label + ' again in ' + seconds + ' s.';
     }
-    return 'The reply for ' + slip + ' was not in the expected form; asking again in ' + seconds + ' s.';
+    return 'The reply for ' + label + ' was not in the expected form; asking again in ' + seconds + ' s.';
   }
 
   function showWait(job, token, text) {
@@ -1170,40 +1273,392 @@
     return key;
   }
 
-  function slipRow(job, r) {
+  // ---------------------------------------------------------------- after the reads
+
+  // A paper the AI analysis is for: a graded answer that is wrong and not
+  // blank. A paper whose only misses are blanks gets a line from code.
+  function needsAnalysis(row) {
+    return (row.answers || []).some(function (a) {
+      return a && a.graded !== false && a.correct === false && String(a.read || '').trim() !== '';
+    });
+  }
+
+  // After a photo's reads: every question with no key answer and nothing
+  // code can work out gets its AI answer (solved twice, kept only when the
+  // two agree); the whole class is graded again against the class settled
+  // with this photo's papers; and each of this photo's papers with a wrong
+  // answer that is not blank gets its AI analysis. All of it is part of the
+  // photo: the screen stays on, Done waits, and Stop reading ends it. The
+  // reader crops are let go here, whatever happens.
+  async function finishPhoto(job, crops, results) {
+    try {
+      var key = gradingKey(job);
+      var solved = {};
+      if (!job.stopped) {
+        var before = await serial(async function () {
+          return T.settle.settle({ key: key, rows: gradable(await store.allRows(), key) });
+        });
+        var list = T.settle.toSolve(before);
+        if (list.length && !job.stopped) solved = await solveAll(job, list);
+      }
+      var mine = {};
+      results.forEach(function (r) { if (r.saved) mine[rowId(job.photoIndex, r.slipIndex)] = crops[r.slipIndex]; });
+      var pending = [];
+      await serial(async function () {
+        try {
+          await regradeAll(key, {
+            solved: solved,
+            each: function (row) {
+              if (!mine[row.id] || row.analysis) return;
+              if (!needsAnalysis(row)) {
+                row.analysisState = 'checked';
+                return;
+              }
+              if (job.stopped) {
+                stoppedState(job, row);
+                return;
+              }
+              row.analysisState = 'pending';
+              pending.push(row.id);
+            }
+          });
+        } finally {
+          tellStorage(el.photoStorage);
+        }
+      });
+      if (pending.length) await analyzeAll(job, pending, mine, key);
+      if (job.failure) throw job.failure;
+    } finally {
+      crops.forEach(function (crop) { crop.reader = null; });
+    }
+  }
+
+  // A paper whose analysis did not run because the photo stopped: why, in
+  // fixed words.
+  function stoppedState(job, row) {
+    var reason = job.stopped && job.stopped.reason;
+    if (reason === 'limit') {
+      row.analysisState = 'failed';
+      row.analysisReason = 'Groq\'s daily limit was reached';
+    } else if (reason === 'key') {
+      row.analysisState = 'failed';
+      row.analysisReason = 'Groq did not accept the key';
+    } else if (reason === 'error') {
+      row.analysisState = 'failed';
+      row.analysisReason = 'a page or storage error stopped it';
+    } else {
+      row.analysisState = 'stopped';
+    }
+  }
+
+  // After a photo that failed in the page: its papers still waiting for an
+  // analysis say why they got none. Best effort; a store that is failing may
+  // refuse this too.
+  function markUnfinished(job) {
+    return serial(async function () {
+      var rows = await store.allRows();
+      var mine = rows.filter(function (row) { return row.photoIndex === job.photoIndex && row.analysisState === 'pending'; });
+      if (!mine.length) return;
+      mine.forEach(function (row) { stoppedState(job, row); });
+      await store.addRows(mine, { regrade: true });
+    });
+  }
+
+  // A step after the reads that fails in the page (not a provider answer)
+  // stops the rest of the photo's calls, and is reported once they settle.
+  function guarded(job, fn) {
+    return fn().catch(function (err) {
+      if (!job.failure) job.failure = err;
+      stopJob(job, 'error', err);
+      return null;
+    });
+  }
+
+  async function solveAll(job, list) {
+    var done = 0, out = {};
+    setText(el.photoProgress, 'Working out answers: 0/' + list.length);
+    await Promise.all(list.map(function (item) {
+      return guarded(job, async function () {
+        var got = await solveQuestion(job, item);
+        done++;
+        if (!job.stopped) setText(el.photoProgress, 'Working out answers: ' + done + '/' + list.length);
+        if (got.entry) out[got.entry.key] = got.entry;
+        else if (got.why !== 'aborted') job.unsolved.push({ q: item.q, why: got.why });
+      });
+    }));
+    return out;
+  }
+
+  // One question with no key, solved twice by differently worded prompts.
+  // -> {entry} to store, or {why} when a solve could not be had ('aborted'
+  // by a stop, 'reply' not in the expected form, 'provider' Groq busy or
+  // out of reach), so the next photo tries again.
+  async function solveQuestion(job, item) {
+    var got = await Promise.all([0, 1].map(function (variant) {
+      var m = T.prompt.solverMessages({ text: item.text, choices: item.choices, instructions: item.instructions, variant: variant });
+      return askModels(job, {
+        label: 'the answer to Q' + item.q,
+        system: m.system,
+        user: m.user,
+        maxTokens: m.maxTokens,
+        parse: function (text) {
+          var r = T.prompt.parseSolution(text);
+          return r.ok ? { ok: true, value: r.solution } : r;
+        }
+      });
+    }));
+    var failed = got.filter(function (g) { return !g.ok; });
+    if (failed.length) {
+      if (failed.some(function (g) { return g.aborted; })) return { why: 'aborted' };
+      var replyKind = function (g) { return g.error && (g.error.kind === 'reply' || g.error.kind === 'invalid_json'); };
+      if (failed.every(replyKind)) return { why: 'reply' };
+      var refused = failed.some(function (g) {
+        var st = g.error && g.error.status;
+        return !replyKind(g) && typeof st === 'number' && st !== 0 && st !== 429 && st < 500 && !g.error.daily;
+      });
+      return { why: refused ? 'refused' : 'provider' };
+    }
+    var a = got[0].value, b = got[1].value;
+    var entry = { key: item.key, q: item.q, exact: !!item.exact, formKind: item.formKind || '',
+      model: got[0].model, answer: '', gradable: false, reason: '' };
+    if (!a.gradable && !b.gradable) {
+      entry.reason = 'The AI found no single answer to check (for example an explain or estimate question), so it was not graded. ' +
+        'Grade it by hand, or type the answer in step 2.';
+    } else if (a.gradable !== b.gradable || !sameSolution(a.answer, b.answer, item.choices)) {
+      entry.reason = 'The two AI solves disagree, so it was not graded. Type the answer in step 2.';
+    } else {
+      entry.gradable = true;
+      entry.answer = a.answer;
+    }
+    return { entry: entry };
+  }
+
+  // Two solves agree: on multiple choice, when both name the same choice (by
+  // label, number, text or value); otherwise by value.
+  function sameSolution(a, b, choices) {
+    if (choices && choices.length) {
+      var ia = T.solve.choiceNamed(a, choices), ib = T.solve.choiceNamed(b, choices);
+      if (ia >= 0 || ib >= 0) return ia === ib;
+    }
+    var va = T.solve.answerValue(a), vb = T.solve.answerValue(b);
+    if (va && vb && va.value && vb.value) return T.solve.equal(va.value, vb.value);
+    return T.grade.equivalent(a, b);
+  }
+
+  async function analyzeAll(job, ids, crops, key) {
+    var done = 0;
+    setText(el.photoProgress, 'Writing analyses: 0/' + ids.length);
+    var settled = T.settle.settle({ key: key, rows: gradable(state.rows, key) });
+    await Promise.all(ids.map(function (id) {
+      return guarded(job, async function () {
+        var row = state.rows.filter(function (r) { return r.id === id; })[0];
+        var crop = crops[id];
+        var result = row && crop && crop.reader && !job.stopped
+          ? await analyzePaper(job, row, crop.reader, settled)
+          : { aborted: true };
+        done++;
+        if (!job.stopped) setText(el.photoProgress, 'Writing analyses: ' + done + '/' + ids.length);
+        if (!result.ok && !(result.aborted && job.stopped && job.stopped.reason === 'teacher')) job.unanalyzed++;
+        await writeAnalysis(job, id, result);
+      });
+    }));
+  }
+
+  // One paper's AI analysis: the image, and for each wrong answer that is
+  // not blank the printed question, the expected answer and where it came
+  // from, code's worked steps when there are any, and the answer as read.
+  // -> {ok, analysis, model, basis} or {ok: false, aborted, error}.
+  async function analyzePaper(job, row, image, settled) {
+    var wrong = row.answers.filter(function (a) {
+      return a.graded !== false && a.correct === false && String(a.read || '').trim() !== '';
+    });
+    var qs = wrong.map(function (a) { return a.q; });
+    var questions = wrong.map(function (a) {
+      var sq = settled.questions[a.q - 1];
+      var text = sq ? (sq.text || (sq.computed ? sq.computed.expression : '')) : '';
+      var steps = '';
+      if (a.source === 'computed' && sq && sq.computed) {
+        // The expression this paper was graded on: its own version, when the
+        // class has two.
+        var exp = T.settle.expectation(settled, { id: row.id, reading: row.reading }, a.q);
+        var expression = exp.expression || sq.computed.expression;
+        if (expression !== sq.computed.expression) {
+          var own = (row.reading.questions || []).filter(function (x) { return x.q === a.q; })[0];
+          text = own && own.text ? own.text : expression;
+        }
+        steps = T.exemplar.stepsText(expression);
+      }
+      return { q: a.q, text: text, expected: a.expected, source: a.source, steps: steps, read: a.read };
+    });
+    var m = T.prompt.analysisMessages({ questions: questions });
+    var out = await askModels(job, {
+      label: 'the analysis of paper ' + (row.slipIndex + 1),
+      image: image,
+      system: m.system,
+      user: m.user,
+      maxTokens: m.maxTokens,
+      parse: function (text) {
+        var r = T.prompt.parseAnalysis(text, qs);
+        return r.ok ? { ok: true, value: r.analysis } : r;
+      }
+    });
+    if (!out.ok) return out;
+    var basis = {};
+    wrong.forEach(function (a) { basis[a.q] = a.expected || ''; });
+    return { ok: true, analysis: out.value, model: out.model, basis: basis };
+  }
+
+  // The analysis goes onto the row as it is stored now, read again on the
+  // store chain: a row discarded, cleared or expired meanwhile stays gone,
+  // a regrade meanwhile stays, and the expiry clock is not restarted.
+  function writeAnalysis(job, id, result) {
+    return serial(async function () {
+      try {
+        var rows = await store.allRows();
+        var row = rows.filter(function (r) { return r.id === id; })[0];
+        if (!row) return;
+        if (result.ok) {
+          row.analysis = result.analysis.text;
+          row.errorPatterns = result.analysis.errors;
+          row.analysisReadConcerns = result.analysis.readConcerns;
+          row.analysisExpectedConcerns = result.analysis.expectedConcerns;
+          row.analysisNoWork = result.analysis.noWork;
+          row.analysisBy = result.model;
+          row.analysisBasis = result.basis;
+          row.analysisState = 'done';
+          delete row.analysisReason;
+        } else if (result.aborted) {
+          stoppedState(job, row);
+        } else {
+          row.analysisState = 'failed';
+          row.analysisReason = analysisFailure(result.error);
+        }
+        await store.addRows([row], { regrade: true });
+        await refreshRows();
+      } finally {
+        tellStorage(el.photoStorage);
+      }
+    });
+  }
+
+  // Fixed words for a failed analysis, never the provider's own text.
+  function analysisFailure(err) {
+    if (!err) return 'no reason given';
+    if (err.daily) return 'Groq\'s daily limit was reached';
+    if (err.kind === 'reply' || err.kind === 'invalid_json') return 'the reply was not in the expected form';
+    if (err.status === 429) return 'Groq stayed busy';
+    if (err.status === 413) return 'the paper was too large a request for this key';
+    if (err.status === 0) return 'no answer from Groq';
+    if (err.status >= 500) return 'Groq had a server problem';
+    return 'Groq refused it';
+  }
+
+  function slipRow(job, r, stored) {
+    var key = gradingKey(job);
     var review = r.reviewer.ok ? r.reviewer.reading : null;
-    return buildRow(gradingKey(job), {
+    var draft = {
+      id: rowId(job.photoIndex, r.slipIndex),
       photoIndex: job.photoIndex,
       slipIndex: r.slipIndex,
       reading: r.reader.reading,
       review: review,
       readBy: r.reader.model,
       reviewedBy: review ? r.reviewer.model : '',
-      reviewMode: review ? SECOND_READ_MODE : 'none'
+      reviewMode: review ? SECOND_READ_MODE : 'none',
+      solved: classSolved(stored)
+    };
+    var others = gradable(stored, key).filter(function (row) { return row.id !== draft.id; });
+    var row = buildRow(key, draft, T.settle.settle({ key: key, rows: others.concat([draft]) }));
+    // Pending until the photo's analyses run (finishPhoto), so a page closed
+    // before then leaves a paper that says so.
+    if (needsAnalysis(row)) row.analysisState = 'pending';
+    return row;
+  }
+
+  function rowId(photoIndex, slipIndex) {
+    return 'p' + photoIndex + '-s' + slipIndex;
+  }
+
+  // The rows a key can grade: read, with as many answers as it has questions.
+  function gradable(rows, key) {
+    return rows.filter(function (row) {
+      return row.reading && Array.isArray(row.reading.answers) && row.reading.answers.length === key.questions.length;
     });
   }
 
-  // A stored row: grade.gradeSlip's output plus where the slip came from, who
-  // read it, and both parsed reads (kept so a key correction can regrade).
-  function buildRow(answerKey, slip) {
+  // Every AI answer stored on any row, keyed by the question it solves
+  // (settle.js). Each row carries them all, so they outlive any one photo
+  // and are cleared with the results.
+  function classSolved(rows) {
+    var all = {};
+    rows.forEach(function (row) {
+      var solved = row && row.solved;
+      if (!solved || typeof solved !== 'object') return;
+      Object.keys(solved).forEach(function (k) {
+        var e = solved[k];
+        if (e && e.key && !all[e.key]) all[e.key] = e;
+      });
+    });
+    return all;
+  }
+
+  // What a row keeps through every regrade: its AI answers and its AI
+  // analysis. The analysis is marked stale in the sheet, not here, by
+  // comparing analysisBasis with the answers the row is graded on then.
+  var CARRIED = ['solved', 'analysis', 'analysisBasis', 'errorPatterns', 'analysisBy', 'analysisState',
+    'analysisReason', 'analysisReadConcerns', 'analysisExpectedConcerns', 'analysisNoWork'];
+
+  // A stored row: grade.gradeSlip's output plus where the paper came from,
+  // who read it, both parsed reads (kept so a key correction can regrade)
+  // and the carried fields. settled (settle.js) says what each question is
+  // graded against.
+  function buildRow(answerKey, slip, settled) {
+    var id = slip.id || rowId(slip.photoIndex, slip.slipIndex);
+    var probe = { id: id, reading: slip.reading, review: slip.review || null };
     var graded = T.grade.gradeSlip({
       key: answerKey,
       reading: slip.reading,
       review: slip.review || null,
-      reviewMode: slip.review ? slip.reviewMode : undefined
+      reviewMode: slip.review ? slip.reviewMode : undefined,
+      expected: settled ? settled.questions.map(function (sq) { return T.settle.expectation(settled, probe, sq.q); }) : undefined
     });
-    graded.id = 'p' + slip.photoIndex + '-s' + slip.slipIndex;
+    graded.id = id;
     graded.photoIndex = slip.photoIndex;
     graded.slipIndex = slip.slipIndex;
     graded.readBy = slip.readBy || '';
     graded.reviewedBy = slip.reviewedBy || '';
     graded.reading = slip.reading;
     graded.review = slip.review || null;
+    CARRIED.forEach(function (field) {
+      if (slip[field] !== undefined) graded[field] = slip[field];
+    });
     return graded;
   }
 
+  // Every stored row the key can grade, graded again against the class
+  // settled from all of them, and written back. opts.solved adds AI answers
+  // to every row first; opts.each(row) may set fields on a row before the
+  // write. Runs on the store chain (the caller's serial). -> the rows written.
+  async function regradeAll(key, opts) {
+    opts = opts || {};
+    var rows = gradable(await store.allRows(), key);
+    if (!rows.length) return [];
+    if (opts.solved) {
+      rows.forEach(function (row) { row.solved = Object.assign({}, row.solved || {}, opts.solved); });
+    }
+    var shared = classSolved(rows);
+    rows.forEach(function (row) { row.solved = Object.assign({}, shared, row.solved || {}); });
+    var settled = T.settle.settle({ key: key, rows: rows });
+    var updated = rows.map(function (row) { return buildRow(key, row, settled); });
+    if (opts.each) updated.forEach(opts.each);
+    // A regrade stores no new paper, so the time of the last photo stays.
+    await store.addRows(updated, { regrade: true });
+    await refreshRows();
+    return updated;
+  }
+
   function reportOutcome(job, results) {
-    var messages = [outcomeMessage(job, results), countDrift(job)].filter(Boolean);
+    var messages = [outcomeMessage(job, results), countDrift(job), afterMessage(job)].filter(Boolean);
     if (!messages.length) return;
     var first = messages[0];
     messages.slice(1).forEach(function (m) {
@@ -1215,8 +1670,8 @@
 
   function slipList(results) {
     var numbers = results.map(function (r) { return String(r.slipIndex + 1); });
-    if (numbers.length === 1) return 'slip ' + numbers[0];
-    return 'slips ' + numbers.slice(0, -1).join(', ') + ' and ' + numbers[numbers.length - 1];
+    if (numbers.length === 1) return 'paper ' + numbers[0];
+    return 'papers ' + numbers.slice(0, -1).join(', ') + ' and ' + numbers[numbers.length - 1];
   }
 
   function outcomeMessage(job, results) {
@@ -1225,29 +1680,54 @@
     if (job.stopped && job.stopped.reason === 'teacher') {
       if (!unsaved.length) return null;
       return {
-        title: 'Stopped reading photo ' + number + '. ' + job.saved + ' of ' + plural(results.length, 'slip', 'slips') +
+        title: 'Stopped reading photo ' + number + '. ' + job.saved + ' of ' + plural(results.length, 'paper', 'papers') +
           (job.saved === 1 ? ' was' : ' were') + ' saved; the other ' + unsaved.length +
           (unsaved.length === 1 ? ' needs' : ' need') + ' a retake.',
         items: [
           'Not read: ' + slipList(unsaved) + ', counted left to right, top row first.',
-          'Photograph just those slips, or discard photo ' + number + ' and take it again.'
+          'Photograph just those papers, or discard photo ' + number + ' and take it again.'
         ]
       };
     }
-    if (job.stopped && job.stopped.reason === 'key') {
-      var items = ['Check the key in step 1 and press Check key, then take the photo again.'];
-      if (job.saved) items.unshift('Slips read before that are saved below.');
-      return { title: 'Groq did not accept the key, so this photo was not fully read.', items: items };
+    if (job.stopped && (job.stopped.reason === 'limit' || job.stopped.reason === 'key') && !unsaved.length) {
+      // Every paper was read and saved; only the steps after the reads were
+      // cut short. The papers are graded: a retake would count them twice.
+      return {
+        title: job.stopped.reason === 'limit'
+          ? 'Every paper in photo ' + number + ' is read and graded, but Groq\'s daily limit was reached before the answers and analyses were done.'
+          : 'Every paper in photo ' + number + ' is read and graded, but Groq stopped accepting the key before the answers and analyses were done.',
+        items: ['Do not retake this photo. The spreadsheet says what is missing; the next photo tries the missing answers again.']
+      };
+    }
+    if (job.stopped && (job.stopped.reason === 'limit' || job.stopped.reason === 'key')) {
+      // Name the papers not read, as a teacher stop does, so a retake never
+      // counts the saved ones twice; a paper that failed for its own reason
+      // is named with that reason.
+      var failedOwn = unsaved.filter(function (r) { return !r.reader.ok && !r.reader.aborted; });
+      var stoppedOnes = unsaved.filter(function (r) { return failedOwn.indexOf(r) < 0; });
+      var stopItems = [];
+      if (job.saved) stopItems.push('Papers read before that are saved below.');
+      if (stoppedOnes.length) stopItems.push('Not read: ' + slipList(stoppedOnes) + ', counted left to right, top row first.');
+      failedOwn.forEach(function (r) { stopItems.push('Paper ' + (r.slipIndex + 1) + ': ' + failureReason(r.reader.error) + '.'); });
+      stopItems.push(job.stopped.reason === 'limit'
+        ? 'Later, or with another Groq key, photograph just those papers, or discard photo ' + number + ' and take it again.'
+        : 'Check the key in step 1 and press Check key, then photograph just those papers, or discard photo ' + number + ' and take it again.');
+      return {
+        title: job.stopped.reason === 'limit'
+          ? 'Groq\'s daily limit is used up for every model this key can use, so photo ' + number + ' was not fully read.'
+          : 'Groq did not accept the key, so photo ' + number + ' was not fully read.',
+        items: stopItems
+      };
     }
     var failed = results.filter(function (r) { return !r.reader.ok; });
     if (!failed.length) return null;
     var lines = failed.map(function (r) {
-      return 'Slip ' + (r.slipIndex + 1) + ': ' + failureReason(r.reader.error) + '.';
+      return 'Paper ' + (r.slipIndex + 1) + ': ' + failureReason(r.reader.error) + '.';
     });
     if (job.modelGone) lines.push('Press Check key in step 1 to refresh the model list.');
-    lines.push('Slips are counted left to right, top row first. Grade those by hand, or discard this photo and take it again.');
+    lines.push('Papers are counted left to right, top row first. Grade those by hand, or discard this photo and take it again.');
     return {
-      title: failed.length + ' of ' + plural(results.length, 'slip', 'slips') +
+      title: failed.length + ' of ' + plural(results.length, 'paper', 'papers') +
         ' could not be read, even after retries and trying every model.',
       items: lines
     };
@@ -1260,9 +1740,34 @@
     if (err.kind === 'reply') return err.message;
     if (err.kind === 'invalid_json') return 'the model\'s reply was not in the expected form';
     if (err.status === 429) return 'Groq stayed busy, even after waiting and retrying';
+    if (err.status === 413) return 'the paper was too large a request for this Groq key\'s limits';
     if (err.status === 0) return 'No answer from Groq; check the connection';
     if (err.status >= 500) return 'Groq had a server problem';
     return 'Groq refused it (' + err.message + ')';
+  }
+
+  // What the steps after the reads left undone: questions with no AI answer
+  // this time, and papers without an analysis.
+  function afterMessage(job) {
+    var items = [];
+    var WHY = {
+      provider: 'Groq was busy or out of reach',
+      reply: 'the AI\'s reply was not in the expected form',
+      refused: 'Groq refused the request'
+    };
+    ['provider', 'reply', 'refused'].forEach(function (why) {
+      var qs = job.unsolved.filter(function (u) { return u.why === why; }).map(function (u) { return u.q; })
+        .sort(function (a, b) { return a - b; }).map(function (q) { return 'Q' + q; });
+      if (!qs.length) return;
+      items.push((qs.length === 1 ? qs[0] + ' has' : qs.join(', ') + ' have') + ' no answer yet: ' + WHY[why] +
+        '. Type the answer in step 2, or take the next photo to try again.' +
+        (why === 'refused' && job.modelGone ? ' Press Check key in step 1 to refresh the model list.' : ''));
+    });
+    if (job.unanalyzed && !(job.stopped && job.stopped.reason === 'teacher')) {
+      items.push(plural(job.unanalyzed, 'paper was', 'papers were') + ' left without an AI analysis; the spreadsheet says why.');
+    }
+    if (!items.length) return null;
+    return { title: 'Photo ' + (job.photoIndex + 1) + ' is graded, with gaps.', items: items };
   }
 
   // The backstop behind the locked question count: if the key's count moved
@@ -1273,7 +1778,7 @@
     var number = job.photoIndex + 1;
     return {
       title: 'The number of questions changed from ' + job.questionCount + ' to ' + now + ' while photo ' + number +
-        ' was read, so its slips were graded on ' + job.questionCount + ' questions.',
+        ' was read, so its papers were graded on ' + job.questionCount + ' questions.',
       items: ['Discard photo ' + number + ', then take it again to grade it on ' + now + '.']
     };
   }
@@ -1292,11 +1797,11 @@
       var number = marker.photoIndex + 1;
       var items = [];
       if (marker.done) {
-        items.push('The ' + plural(marker.done, 'slip', 'slips') + ' read before that ' + (marker.done === 1 ? 'is' : 'are') +
-          ' saved below. Discard photo ' + number + ' first if you retake every slip in it.');
+        items.push('The ' + plural(marker.done, 'paper', 'papers') + ' read before that ' + (marker.done === 1 ? 'is' : 'are') +
+          ' saved below. Discard photo ' + number + ' first if you retake every paper in it.');
       }
       showError(el.photoError, {
-        title: 'Photo ' + number + ' was interrupted after ' + marker.done + ' of ' + plural(marker.total, 'slip', 'slips') +
+        title: 'Photo ' + number + ' was interrupted after ' + marker.done + ' of ' + plural(marker.total, 'paper', 'papers') +
           '; take it again to read the rest.',
         items: items
       });
@@ -1309,7 +1814,14 @@
   async function refreshRows() {
     state.rows = await store.allRows();
     renderResults();
+    showExpected(settleStored());
     updateReadiness();
+  }
+
+  // The class as stored, settled on the answer key as it stands.
+  function settleStored() {
+    var key = readAnswerKey();
+    return T.settle.settle({ key: key, rows: gradable(state.rows, key) });
   }
 
   function groupByPhoto(rows) {
@@ -1345,7 +1857,7 @@
 
     var head = make('div', 'photo-head');
     var title = make('h3', null, 'Photo ' + number + ' ');
-    title.appendChild(make('span', 'photo-count', '(' + plural(n, 'slip', 'slips') + ')'));
+    title.appendChild(make('span', 'photo-count', '(' + plural(n, 'paper', 'papers') + ')'));
     var discard = make('button', 'btn btn-secondary btn-small discard', 'Discard this photo');
     discard.type = 'button';
     // The photo still being read is stopped with Stop reading, not discarded
@@ -1419,11 +1931,19 @@
   function flagsText(row) {
     var parts = [];
     if (row.nameFlag) parts.push('name');
+    var current = T.grade.analysisCurrent(row);
+    var readDoubt = current ? row.analysisReadConcerns || [] : [], keyDoubt = current ? row.analysisExpectedConcerns || [] : [];
     (row.answers || []).forEach(function (a) {
-      if (a && a.flagged) parts.push('Q' + a.q);
+      if (!a) return;
+      if (a.graded === false) parts.push('Q' + a.q + ' not graded');
+      else if (keyDoubt.indexOf(a.q) >= 0) parts.push('Q' + a.q + ' check expected answer');
+      else if (readDoubt.indexOf(a.q) >= 0) parts.push('Q' + a.q + ' check read');
+      else if (a.aiSolved) parts.push('Q' + a.q + ' AI-solved');
+      else if (a.flagged) parts.push('Q' + a.q);
     });
     if (row.reviewMode === 'none') parts.push('no second read');
-    return row.flagged || parts.length ? ('* ' + parts.join(', ')).trim() : '';
+    var marked = T.grade.rowFlagged(row);
+    return marked || parts.length ? ((marked ? '* ' : '') + parts.join(', ')).trim() : '';
   }
 
   // ---------------------------------------------------------------- Done
@@ -1630,7 +2150,12 @@
     var key = readAnswerKey();
     var date = new Date();
     var summary = T.grade.summarize(rows, key, { passPercent: key.passPercent });
-    var workbook = T.sheet.buildWorkbook({ rows: rows, key: key, summary: summary, assignment: key.assignment, date: date });
+    var settled = T.settle.settle({ key: key, rows: gradable(rows, key) });
+    var exemplars = T.exemplar.forClass(settled, { equivalent: T.grade.equivalent, exactValue: T.grade.exactValue });
+    var workbook = T.sheet.buildWorkbook({
+      rows: rows, key: key, summary: summary, settled: settled, exemplars: exemplars,
+      assignment: key.assignment, date: date
+    });
     var name = T.sheet.fileName(key.assignment, date);
     var url = URL.createObjectURL(new Blob([T.sheet.toArrayBuffer(workbook)], { type: XLSX_TYPE }));
     var link = make('a');
@@ -1742,7 +2267,11 @@
     store.ready().then(function () {
       tellStorage();
       return expireStale();
-    }).then(refreshRows).then(noteInterrupted).catch(function (err) {
+    }).then(refreshRows).then(noteInterrupted).then(function () {
+      // A page closed after a photo's reads but before its last steps: the
+      // class is graded again so every paper is on the same answers.
+      if (state.rows.some(function (row) { return row.analysisState === 'pending'; })) return regrade();
+    }).catch(function (err) {
       showError(el.photoError, unexpected(err));
     }).then(function () {
       tellStorage();

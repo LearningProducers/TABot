@@ -79,7 +79,9 @@ const SUMMARY = {
 };
 
 const HEADERS = ['Student', 'Score', 'Max', 'Percent', 'Q1', 'Q2', 'Q3', 'Q4',
-  'Flags', 'Notes', 'Read by', 'Reviewed by', 'Review'];
+  'Flags', 'Analysis (AI)', 'Notes', 'Read by', 'Reviewed by', 'Review'];
+const ALL_RIGHT = 'Every graded answer matches the expected answer.';
+const PATTERNS_HEAD = ['Common error patterns (AI observations)', 'Students', 'Questions'];
 
 function roundTrip(wb) {
   const buf = sheet.toArrayBuffer(wb);
@@ -108,11 +110,11 @@ test('fileName: TABot_<assignment>_<YYYY-MM-DD>.xlsx', () => {
   assert.match(sheet.fileName('x'), /^TABot_x_\d{4}-\d{2}-\d{2}\.xlsx$/);
 });
 
-test('workbook has Roster and Summary, survives write and read', () => {
+test('workbook has Roster, Summary and Exemplars, survives write and read', () => {
   const wb = sheet.buildWorkbook({ rows: ROWS, key: KEY, summary: SUMMARY, assignment: 'Unit 3 Quiz', date: '2026-09-24' });
-  assert.deepEqual(wb.SheetNames, ['Roster', 'Summary']);
+  assert.deepEqual(wb.SheetNames, ['Roster', 'Summary', 'Exemplars']);
   const back = roundTrip(wb);
-  assert.deepEqual(back.SheetNames, ['Roster', 'Summary']);
+  assert.deepEqual(back.SheetNames, ['Roster', 'Summary', 'Exemplars']);
 });
 
 test('Roster: headers, answer cells, flags, numbers, review mode', () => {
@@ -123,9 +125,10 @@ test('Roster: headers, answer cells, flags, numbers, review mode', () => {
   assert.deepEqual(g[0], HEADERS);
   assert.equal(g.length, 4);
 
-  assert.deepEqual(g[1], ['Ana', 5, 5, 100, '0.5 ✓', '-3 ✓', '2(x+3) ✓', '12 ✓', '', '', 'vision-model-a', 'vision-model-b', 'two-model']);
-  assert.deepEqual(g[2], ['Ben', 3, 5, 60, '1/2 ✓', '3 ✗', '2x+6 ✓ *', '(blank) ✗', '*', 'Q3: reader 2x+6, reviewer 2x+8', 'vision-model-a', 'vision-model-b', 'two-model']);
-  assert.deepEqual(g[3], ['Cy *', 2, 5, 40, '2/4 ✓', '-3 ✓', '2x ✗', '21 ✗', '*', 'name unclear', 'vision-model-a', 'vision-model-a', 'single-model review']);
+  assert.deepEqual(g[1], ['Ana', 5, 5, 100, '0.5 ✓', '-3 ✓', '2(x+3) ✓', '12 ✓', '', ALL_RIGHT, '', 'vision-model-a', 'vision-model-b', 'two-model']);
+  // No analysis state on these rows: the cell says nothing it cannot know.
+  assert.deepEqual(g[2], ['Ben', 3, 5, 60, '1/2 ✓', '3 ✗', '2x+6 ✓ *', '(blank) ✗', '*', '', 'Q3: reader 2x+6, reviewer 2x+8', 'vision-model-a', 'vision-model-b', 'two-model']);
+  assert.deepEqual(g[3], ['Cy *', 2, 5, 40, '2/4 ✓', '-3 ✓', '2x ✗', '21 ✗', '*', '', 'name unclear', 'vision-model-a', 'vision-model-a', 'single-model review']);
 
   // The flagged answer and the blank answer, cell by cell.
   assert.equal(cell(ws, 2, 6).v, '2x+6 ✓ *');
@@ -147,7 +150,7 @@ test('Roster: percent rounds to one decimal, flagged blank, missing answer, no n
   }];
   const summary = { students: 1, mean: 100 / 3, median: 100 / 3, passRate: 0, perQuestion: [], distribution: [], flaggedRows: 1, singleModelRows: 1 };
   const g = grid(roundTrip(sheet.buildWorkbook({ rows, key, summary, assignment: 'x', date: '2026-09-24' })).Sheets.Roster);
-  assert.deepEqual(g[1], ['(no name)', 1, 3, 33.3, '1 ✓', '(blank) ✗ *', '(blank) ✗', '*', 'reader note\nreviewer note', 'm', 'm', 'single-model review']);
+  assert.deepEqual(g[1], ['(no name)', 1, 3, 33.3, '1 ✓', '(blank) ✗ *', '(blank) ✗', '*', 'Left Q2 blank.', 'reader note\nreviewer note', 'm', 'm', 'single-model review']);
 });
 
 test('Summary: label/value block, per-question table, distribution', () => {
@@ -170,7 +173,11 @@ test('Summary: label/value block, per-question table, distribution', () => {
     ['Q4', 33.3],
     [null, null],
     ['Score band', 'Students']
-  ].concat(BANDS.map((b, i) => [b, BAND_COUNTS[i]]));
+  ].concat(BANDS.map((b, i) => [b, BAND_COUNTS[i]])).concat([
+    [null, null],
+    PATTERNS_HEAD.slice(0, 2),
+    ['No AI analysis was written.', null]
+  ]);
   assert.deepEqual(g, expected);
 
   for (const r of [0, 1, 2, 3, 4, 5, 8, 9, 10, 11]) assert.equal(cell(ws, r, 1).t, 'n', 'Summary row ' + r);
@@ -191,25 +198,26 @@ test('Summary: the per-question table has a Match column from the key', () => {
   const ws = roundTrip(sheet.buildWorkbook({ rows: ROWS, key: MATCH_KEY, summary: SUMMARY, assignment: 'a', date: '2026-09-24' })).Sheets.Summary;
   const g = grid(ws);
 
-  assert.deepEqual(g[7], ['Question', 'Hit rate %', 'Match']);
+  assert.deepEqual(g[7], ['Question', 'Hit rate %', 'Match', 'Expected answer', 'Answer from', 'Printed question as read']);
   assert.deepEqual(g.slice(8, 12), [
-    ['Q1', 100, 'value'],
-    ['Q2', 66.7, 'value'],
-    ['Q3', 66.7, 'exact form'],
-    ['Q4', 33.3, 'exact form']
+    ['Q1', 100, 'value', null, 'answer key', null],
+    ['Q2', 66.7, 'value', null, 'answer key', null],
+    ['Q3', 66.7, 'exact form', null, 'answer key', null],
+    ['Q4', 33.3, 'exact form', null, 'answer key', null]
   ]);
   for (const r of [8, 9, 10, 11]) assert.equal(cell(ws, r, 2).t, 's', 'Match is text on row ' + r);
 
-  // Nothing else in the sheet gains a third column.
+  // Nothing else in the sheet gains a third column but the error patterns.
   for (let r = 0; r < g.length; r++) {
     if (r >= 7 && r <= 11) continue;
+    if (g[r][0] === PATTERNS_HEAD[0]) continue;
     assert.equal(g[r][2], null, 'row ' + r + ' has no Match cell');
   }
 });
 
 test('Summary: a key saved without match settings reads as value throughout', () => {
   const g = grid(roundTrip(sheet.buildWorkbook({ rows: ROWS, key: KEY, summary: SUMMARY, assignment: 'a', date: '2026-09-24' })).Sheets.Summary);
-  assert.deepEqual(g[7], ['Question', 'Hit rate %', 'Match']);
+  assert.deepEqual(g[7].slice(0, 3), ['Question', 'Hit rate %', 'Match']);
   assert.deepEqual(g.slice(8, 12).map((r) => r[2]), ['value', 'value', 'value', 'value']);
 });
 
@@ -221,7 +229,7 @@ test('Summary: an unknown match value or a missing key reads as value', () => {
   assert.deepEqual(g.slice(8, 12).map((r) => r[2]), ['value', 'value', 'value', 'value']);
 
   const g2 = grid(roundTrip(sheet.buildWorkbook({ rows: ROWS, key: null, summary: SUMMARY, assignment: 'a', date: '2026-09-24' })).Sheets.Summary);
-  assert.deepEqual(g2[7], ['Question', 'Hit rate %', 'Match']);
+  assert.deepEqual(g2[7].slice(0, 3), ['Question', 'Hit rate %', 'Match']);
   assert.deepEqual(g2.slice(8, 12).map((r) => r[2]), ['value', 'value', 'value', 'value']);
 });
 
@@ -241,13 +249,14 @@ test('pass mark in the label follows the key', () => {
   assert.equal(g2[3][0], 'Pass rate % (pass at 70%)');
 });
 
-test('column widths are set on both sheets', () => {
+test('column widths are set on every sheet', () => {
   const wb = sheet.buildWorkbook({ rows: ROWS, key: KEY, summary: SUMMARY, assignment: 'a', date: '2026-09-24' });
   const cols = wb.Sheets.Roster['!cols'];
   assert.equal(cols.length, HEADERS.length);
   assert.ok(cols.every((c) => Number.isFinite(c.wch) && c.wch >= 6 && c.wch <= 60));
-  assert.ok(cols[9].wch >= 20, 'Notes is wide enough to read');
-  assert.equal(wb.Sheets.Summary['!cols'].length, 3);
+  assert.ok(cols[9].wch >= 24, 'Analysis (AI) is wide enough to read');
+  assert.ok(cols[10].wch >= 20, 'Notes is wide enough to read');
+  assert.equal(wb.Sheets.Summary['!cols'].length, 6);
   const exact = sheet.buildWorkbook({ rows: ROWS, key: MATCH_KEY, summary: SUMMARY, assignment: 'a', date: '2026-09-24' });
   assert.ok(exact.Sheets.Summary['!cols'][2].wch >= 'exact form'.length, 'Match fits "exact form"');
 });
@@ -278,4 +287,132 @@ test('an empty class still builds: headers only, zeros in Summary', () => {
 
 test('buildWorkbook without a summary is a clear error', () => {
   assert.throws(() => sheet.buildWorkbook({ rows: ROWS, key: KEY }), /summary/);
+});
+
+// ---- no key, AI analysis, exemplars
+
+const NOKEY = { passPercent: 70, questions: [{ answer: '', points: 1 }, { answer: '', points: 2 }, { answer: '', points: 1 }] };
+
+function noKeyRow(name, answers, extra) {
+  return Object.assign({
+    studentName: name, nameFlag: false, answers,
+    score: answers.reduce((s, a) => s + a.points, 0), maxScore: answers.reduce((s, a) => s + a.maxPoints, 0),
+    flagged: false, notes: '', readBy: 'm', reviewedBy: 'm', reviewMode: 'single-model'
+  }, extra || {});
+}
+
+test('Roster: an ungraded question reads "(not graded)"; an AI-solved cell carries one asterisk', () => {
+  const rows = [noKeyRow('Eve', [
+    ans(1, 'B', true, 1, { source: 'computed', graded: true, expected: 'B (42)' }),
+    ans(2, '15', true, 2, { source: 'ai', graded: true, aiSolved: true, expected: '15' }),
+    ans(3, '7', null, 0, { source: 'none', graded: false, correct: null, expected: '' })
+  ], { notes: 'AI-solved, check: Q2\nNot graded: Q3' })];
+  const summary = { students: 1, notGraded: 0, mean: 100, median: 100, passRate: 100,
+    perQuestion: [{ q: 1, hitRate: 100 }, { q: 2, hitRate: 100 }, { q: 3, hitRate: null }], distribution: [], flaggedRows: 0, singleModelRows: 1 };
+  const g = grid(roundTrip(sheet.buildWorkbook({ rows, key: NOKEY, summary, assignment: 'x', date: '2026-09-24' })).Sheets.Roster);
+  assert.deepEqual(g[1].slice(4, 10), ['B ✓', '15 ✓ *', '7 (not graded)', '*',
+    ALL_RIGHT + ' Q2 was checked against an AI-solved answer. Q3 not graded.', 'AI-solved, check: Q2\nNot graded: Q3']);
+});
+
+test('Roster: a paper with nothing graded has no percent and says so', () => {
+  const rows = [noKeyRow('Fay', [
+    ans(1, '3', null, 0, { graded: false, correct: null }),
+    ans(2, '4', null, 0, { graded: false, correct: null }),
+    ans(3, '', null, 0, { graded: false, correct: null })
+  ])];
+  const summary = { students: 1, notGraded: 1, mean: 0, median: 0, passRate: 0, perQuestion: [], distribution: [], flaggedRows: 0, singleModelRows: 1 };
+  const wb = roundTrip(sheet.buildWorkbook({ rows, key: NOKEY, summary, assignment: 'x', date: '2026-09-24' }));
+  const g = grid(wb.Sheets.Roster);
+  assert.equal(g[1][3], null, 'no percent');
+  assert.equal(g[1][8], 'No question on this paper could be graded.');
+  const s = grid(wb.Sheets.Summary);
+  assert.deepEqual(s[6].slice(0, 2), ['Papers with nothing graded', 1]);
+  assert.equal(s[7][0], 'These have no percent and are left out of the mean, median, pass rate and bands.');
+  assert.deepEqual(s.slice(1, 4).map((r) => r[1]), [null, null, null], 'no class figures when nothing was graded');
+});
+
+test('Analysis (AI): the sentences, marked when the key changed since; a code line otherwise', () => {
+  const wrong = [ans(1, '9032', false, 1, { expected: '9022', graded: true }), ans(2, '4', true, 2, { expected: '4', graded: true }), ans(3, '1', true, 1, { expected: '1', graded: true })];
+  const rows = [
+    noKeyRow('Gus', wrong, { analysis: 'Q1: partial products right, the sum is off.', analysisBasis: { 1: '9022' } }),
+    noKeyRow('Hal', wrong, { analysis: 'Q1: the sum is off.', analysisBasis: { 1: '9012' } }),
+    noKeyRow('Ivy', wrong, { analysisState: 'stopped' }),
+    noKeyRow('Jo', wrong, { analysisState: 'failed', analysisReason: 'Groq stayed busy' }),
+    noKeyRow('Kai', wrong, { analysisState: 'pending' }),
+    noKeyRow('Lu', wrong, { analysis: 'Q1: looks like 9022 on the paper.', analysisBasis: { 1: '9022' }, analysisReadConcerns: [1] }),
+    noKeyRow('Mo', wrong, { analysis: 'Q1: 9032 is right.', analysisBasis: { 1: '9022' }, analysisExpectedConcerns: [1] }),
+    noKeyRow('Ned', wrong, { analysisState: 'checked' })
+  ];
+  const summary = { students: 6, mean: 75, median: 75, passRate: 100, perQuestion: [], distribution: [], flaggedRows: 0, singleModelRows: 6 };
+  const g = grid(roundTrip(sheet.buildWorkbook({ rows, key: NOKEY, summary, assignment: 'x', date: '2026-09-24' })).Sheets.Roster);
+  assert.equal(g[1][8], 'Q1: partial products right, the sum is off.');
+  assert.equal(g[2][8], 'Q1: the sum is off. (the expected answer to Q1 has changed since this was written)');
+  assert.equal(g[3][8], 'Analysis not written: reading was stopped.');
+  assert.equal(g[4][8], 'Analysis not written: Groq stayed busy.');
+  assert.equal(g[5][8], 'Analysis not written: the page closed before it was done.');
+  assert.equal(g[6][7], '*', 'a read concern flags the row');
+  assert.equal(g[6][9], 'The AI analysis reads Q1 differently from the reader; check the answer on the paper.');
+  assert.equal(g[7][9], 'The AI analysis says the answer to Q1 looks right; check the expected answer.');
+  assert.equal(g[7][7], '*');
+  assert.equal(g[8][8], 'No AI analysis: this paper had no wrong answer when it was read.');
+});
+
+test('Summary: expected answers, where they came from, the question as read, AI-solved and key conflicts', () => {
+  const rows = [noKeyRow('Eve', [
+    ans(1, 'B', true, 1, { source: 'computed', graded: true, expected: 'B (42)' }),
+    ans(2, '15', true, 2, { source: 'ai', graded: true, aiSolved: true, expected: '15' }),
+    ans(3, '7', null, 0, { source: 'none', graded: false, correct: null, expected: '' })
+  ])];
+  const settled = { questions: [
+    { q: 1, source: 'computed', computed: { expression: '6 x 7', support: { agree: 1, of: 1 } } },
+    { q: 2, source: 'ai', text: 'Sam has 24 apples and gives away 9. How many are left?' },
+    { q: 3, source: 'none', reason: 'The question depends on a picture, graph or table.', text: 'Find the shaded area.' }
+  ] };
+  const key = { passPercent: 70, questions: [{ answer: '', points: 1 }, { answer: '', points: 2 }, { answer: '1288', points: 1 }] };
+  settled.questions[2].keyConflict = 'Q3: the key says 1228; the printed question as read (46 x 28, on 3 of 3 papers) works out to 1,288. One of them is off.';
+  const summary = { students: 1, notGraded: 0, mean: 100, median: 100, passRate: 100,
+    perQuestion: [{ q: 1, hitRate: 100 }, { q: 2, hitRate: 100 }, { q: 3, hitRate: null }], distribution: [], flaggedRows: 0, singleModelRows: 1,
+    errorPatterns: [{ pattern: 'addition', students: 2, questions: [1] }], analyses: 2, staleAnalyses: 1 };
+  const g = grid(roundTrip(sheet.buildWorkbook({ rows, key, summary, settled, assignment: 'x', date: '2026-09-24' })).Sheets.Summary);
+  const at = g.findIndex((r) => r[0] === 'Question');
+  assert.deepEqual(g.slice(at + 1, at + 4), [
+    ['Q1', 100, 'value', 'B (42)', 'worked out by code', '6 x 7 (read this way on 1 of 1 paper)'],
+    ['Q2', 100, 'value', '15', 'AI-solved, check', 'Sam has 24 apples and gives away 9. How many are left?'],
+    ['Q3', 'not graded', null, null, 'not graded', 'Find the shaded area.']
+  ]);
+  const ng = g.findIndex((r) => r[0] === 'Not graded');
+  assert.equal(g[ng + 1][0], 'Q3: The question depends on a picture, graph or table.');
+  const text = g.map((r) => r[0]).filter(Boolean);
+  assert.ok(text.some((t) => /^AI-solved, check: Q2\. /.test(t)));
+  assert.ok(text.includes('The key and the printed question disagree'));
+  assert.ok(text.includes(settled.questions[2].keyConflict));
+  const p = g.findIndex((r) => r[0] === PATTERNS_HEAD[0]);
+  assert.deepEqual(g[p].slice(0, 3), PATTERNS_HEAD);
+  assert.deepEqual(g[p + 1].slice(0, 3), ['addition', 2, 'Q1']);
+  assert.equal(g[p + 2][0], '1 analysis was written before an expected answer it covers changed, and is left out of these counts.');
+});
+
+test('Exemplars: a heading, each worked example one digit to a narrow column, and the reason for the rest', () => {
+  const E = require('../../js/exemplar.js');
+  const G = require('../../js/grade.js');
+  const exemplars = E.forClass({ questions: [
+    { q: 1, computed: { expression: '347 x 26', support: { agree: 3, of: 3 }, versions: [] }, method: null, choices: [], keyAnswer: '' },
+    { q: 2, computed: null, text: 'Sam has 24 apples.' }
+  ] }, { equivalent: G.equivalent, exactValue: G.exactValue });
+  const built = sheet.buildWorkbook({ rows: ROWS, key: KEY, summary: SUMMARY, exemplars, assignment: 'x', date: '2026-09-24' });
+  const cols = built.Sheets.Exemplars['!cols'];
+  const ws = roundTrip(built).Sheets.Exemplars;
+  const g = grid(ws);
+  assert.match(g[0][0], /^Worked examples, computed and checked by TABot's code, not by AI\./);
+  assert.equal(g[2][0], 'Q1');
+  assert.deepEqual(g[3].slice(0, 2), ['Question', '347 × 26  read this way on 3 of 3 papers']);
+  const top = g.findIndex((r) => r[3] === '3' && r[4] === '4' && r[5] === '7');
+  assert.ok(top > 0, 'the top number is in the grid');
+  assert.deepEqual(g[top + 1].slice(0, 6), [null, '×', null, null, '2', '6']);
+  assert.deepEqual(g[top + 4].slice(0, 6), [null, '=', '9', '0', '2', '2']);
+  assert.equal(cell(ws, top, 3).t, 's', 'digits are text, so none turns into a number');
+  const why = g.find((r) => r[0] === 'Q2');
+  assert.match(why[1], /^No worked example: The question is not arithmetic/);
+  assert.equal(cols[0].wch, 10);
+  assert.ok(cols.slice(1, 6).every((c) => c.wch <= 4), 'digit columns are narrow');
 });

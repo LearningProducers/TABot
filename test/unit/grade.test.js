@@ -2661,7 +2661,7 @@ test('summarize: empty rows give zeros and no NaN', () => {
   assert.equal(s.mean, 0);
   assert.equal(s.median, 0);
   assert.equal(s.passRate, 0);
-  assert.deepEqual(s.perQuestion, [1, 2, 3, 4].map((q) => ({ q, hitRate: 0 })));
+  assert.deepEqual(s.perQuestion, [1, 2, 3, 4].map((q) => ({ q, hitRate: null, graded: 0 })));
   assert.ok(s.distribution.every((d) => d.count === 0));
   assert.equal(s.distribution.length, 10);
   assert.equal(s.flaggedRows, 0);
@@ -2674,6 +2674,46 @@ test('summarize: a zero-point key gives 0 percent, not NaN', () => {
   const s = summarize([{ score: 0, maxScore: 0, answers: [] }], { questions: [] });
   assert.equal(s.mean, 0);
   assertNoNaN(s, 'summary');
+});
+
+test('summarize: a paper with nothing graded is left out of mean, median, pass rate and bands', () => {
+  const rows = [
+    { score: 0, maxScore: 0, answers: [{ q: 1, graded: false, correct: null }, { q: 2, graded: false, correct: null }] },
+    { score: 1, maxScore: 1, answers: [{ q: 1, graded: true, correct: true }, { q: 2, graded: false, correct: null }] },
+  ];
+  const s = summarize(rows, { questions: [{ answer: '' }, { answer: '' }] }, { passPercent: 70 });
+  assert.equal(s.students, 2);
+  assert.equal(s.notGraded, 1);
+  assert.equal(s.mean, 100);
+  assert.equal(s.median, 100);
+  assert.equal(s.passRate, 100);
+  assert.equal(s.distribution[0].count, 0, 'the 0/0 paper is in no band');
+  assert.equal(s.distribution[9].count, 1);
+  assert.deepEqual(s.perQuestion, [{ q: 1, hitRate: 100, graded: 1 }, { q: 2, hitRate: null, graded: 0 }]);
+});
+
+test('summarize: error patterns count students, from current analyses only', () => {
+  const row = (patterns, expected, basis) => ({
+    score: 0, maxScore: 1,
+    answers: [{ q: 1, graded: true, correct: false, expected }, { q: 2, graded: true, correct: true, expected: '7' }],
+    analysis: 'Partial products right; the sum is off.',
+    analysisBasis: basis,
+    errorPatterns: patterns,
+  });
+  const rows = [
+    row([{ q: 1, pattern: 'addition' }, { q: 1, pattern: 'regrouping' }], '1288', { 1: '1288' }),
+    row([{ q: 1, pattern: 'addition' }], '1288', { 1: '1288' }),
+    row([{ q: 1, pattern: 'addition' }], '1288', { 1: '1228' }),
+  ];
+  // Q2 is not covered by any analysis, so a change to it stales none.
+  rows[0].answers[1].expected = '8';
+  const s = summarize(rows, { questions: [{ answer: '' }, { answer: '' }] });
+  assert.deepEqual(s.errorPatterns, [
+    { pattern: 'addition', students: 2, questions: [1] },
+    { pattern: 'regrouping', students: 1, questions: [1] },
+  ]);
+  assert.equal(s.analyses, 2);
+  assert.equal(s.staleAnalyses, 1);
 });
 
 test('equivalent: a typed >= and the handwritten sign are the same relation', () => {

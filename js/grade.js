@@ -228,12 +228,15 @@
 })(typeof self !== 'undefined' ? self : this, function (root) {
   'use strict';
 
-  var math = (typeof module === 'object' && module.exports && typeof require === 'function')
-    ? require('../vendor/math.js')
-    : root.math;
+  var inNode = typeof module === 'object' && module.exports && typeof require === 'function';
+  var math = inNode ? require('../vendor/math.js') : root.math;
   if (!math || typeof math.parse !== 'function') {
     // Fail loud: grading without math.js would silently mark "2(x+3)" wrong.
     throw new Error('TABot.grade needs vendor/math.js loaded first');
+  }
+  var solve = inNode ? require('./solve.js') : root.TABot && root.TABot.solve;
+  if (!solve || typeof solve.compute !== 'function') {
+    throw new Error('TABot.grade needs js/solve.js loaded first');
   }
 
   // Longer answers are never parsed. The cap also bounds parse-tree depth, so
@@ -1329,6 +1332,151 @@
     return equivalent(a, b);
   }
 
+  // ------------------------------------------------------------------ expected answers
+
+  // A number followed by a word or two ("5 apples", "12 cookies each"):
+  // {number, words}, else null.
+  function nounSplit(s) {
+    var m = /^\s*(.*?\d[\d.,/]*)\s+([a-z]+(?:\s+[a-z]+)?)\s*\.?\s*$/i.exec(text(s));
+    return m && !/[a-z]/i.test(m[1]) ? { number: m[1], words: m[2].toLowerCase() } : null;
+  }
+
+  // Place-value words, singular and plural, to one name per place.
+  var PLACE_WORDS = {
+    one: 'ones', ones: 'ones', ten: 'tens', tens: 'tens', hundred: 'hundreds', hundreds: 'hundreds',
+    thousand: 'thousands', thousands: 'thousands', million: 'millions', millions: 'millions',
+    tenth: 'tenths', tenths: 'tenths', hundredth: 'hundredths', hundredths: 'hundredths',
+    thousandth: 'thousandths', thousandths: 'thousandths'
+  };
+  var FILLER_WORDS = { each: 1, total: 1, altogether: 1, left: 1, all: 1, in: 1 };
+
+  // Words that change what a number means: they must be the same.
+  var MEANING_WORDS = { more: 1, fewer: 1, less: 1, greater: 1, larger: 1, smaller: 1 };
+
+  // The forms a word may take without its plural ending: cookies -> cookie,
+  // boxes -> box, berries -> berry.
+  function forms(w) {
+    var out = [w];
+    if (/s$/.test(w) && !/ss$/.test(w)) out.push(w.slice(0, -1));
+    if (/es$/.test(w)) out.push(w.slice(0, -2));
+    if (/ies$/.test(w)) out.push(w.slice(0, -3) + 'y');
+    return out;
+  }
+
+  function sameWord(a, b) {
+    var fb = forms(b);
+    return forms(a).some(function (x) { return fb.indexOf(x) >= 0; });
+  }
+
+  function sameWords(a, b) {
+    return a.length === b.length && a.every(function (w, i) { return sameWord(w, b[i]); });
+  }
+
+  // The words after a number, set up for comparing: filler dropped, plurals
+  // made singular. Units and place-value words are kept apart.
+  function wordsOf(words) {
+    var kept = words.split(' ').filter(function (w) { return w && !FILLER_WORDS[w]; });
+    return {
+      units: kept.filter(function (w) { return UNIT_CANON[w] !== undefined || PLACE_WORDS[w]; })
+        .map(function (w) { return UNIT_CANON[w] !== undefined ? UNIT_CANON[w] : PLACE_WORDS[w]; }),
+      rest: kept.filter(function (w) { return UNIT_CANON[w] === undefined && !PLACE_WORDS[w]; }),
+      meaning: kept.filter(function (w) { return MEANING_WORDS[w]; }).sort()
+    };
+  }
+
+  // Compares a read with an AI answer: {correct, flag}. A trailing word or
+  // two on ONE side only is set aside ("15 apples" against 15). When both
+  // sides carry words, a unit or place-value word must be the same unit or
+  // place ("5 cm" never matches "5 m", "4 tens" never "4 hundreds"); other
+  // words are compared without filler or plural endings, and when they still
+  // differ the numbers decide and the cell is flagged.
+  function matchesAi(read, ai) {
+    var a = nounSplit(read), b = nounSplit(ai);
+    if (a && b) {
+      var wa = wordsOf(a.words), wb = wordsOf(b.words);
+      if ((wa.units.length || wb.units.length) && wa.units.join(' ') !== wb.units.join(' ')) return { correct: false, flag: '' };
+      if (wa.meaning.join(' ') !== wb.meaning.join(' ')) return { correct: false, flag: '' };
+      var ok = equivalent(a.number, b.number);
+      var same = sameWords(wa.rest, wb.rest);
+      return { correct: ok, flag: ok && !same ? 'the words after the number differ from the AI answer; check' : '' };
+    }
+    return { correct: equivalent(a ? a.number : read, b ? b.number : ai), flag: '' };
+  }
+
+  // The expected answer as the teacher reads it in the Summary and on a cell.
+  function expectedText(exp) {
+    if (!exp) return '';
+    if (exp.source === 'none') return '';
+    var base;
+    if (exp.source === 'key') base = exp.keyAnswer;
+    else if (exp.source === 'computed') base = solve.withCommas(solve.canonical(exp.computed.value, { decimal: exp.computed.decimal }));
+    else base = exp.ai ? exp.ai.answer : '';
+    if (exp.choices && exp.choices.length && exp.correctIndex >= 0) {
+      var c = exp.choices[exp.correctIndex];
+      return (c.label ? solve.normLabel(c.label) + ' (' + c.text + ')' : c.text);
+    }
+    return base;
+  }
+
+  // Whether one read scores against an expectation from settle.js:
+  // {graded, correct, flags, mark}. mark is the resolved choice, for
+  // comparing the two reads of a multiple-choice question.
+  function judge(read, exp) {
+    if (exp.source === 'none') return { graded: false, correct: null, flags: [] };
+    if (exp.choices && exp.choices.length && exp.correctIndex >= 0) {
+      var mark = solve.resolveMark(read, exp.choices);
+      if (mark.none) return { graded: true, correct: false, flags: [], mark: 'blank' };
+      if (mark.two) return { graded: true, correct: false, flags: ['more than one choice marked'], mark: 'two' };
+      if (mark.unknown) return { graded: false, correct: null, flags: ['the answer names no choice on the paper'], mark: 'unknown:' + normalize(read) };
+      return { graded: true, correct: mark.index === exp.correctIndex, flags: [], mark: 'choice:' + mark.index };
+    }
+    if (exp.source === 'key') return { graded: true, correct: scores(read, exp.keyAnswer, exp.match), flags: [] };
+    if (exp.source === 'computed') {
+      var a = solve.accepts(read, exp.computed);
+      if (a) {
+        return { graded: true, correct: a.match, flags: a.nearMiss ? ['matches the worked answer when rounded; check whether rounding was asked for'] : [] };
+      }
+      return { graded: true, correct: equivalent(read, solve.canonical(exp.computed.value, { decimal: exp.computed.decimal })), flags: [] };
+    }
+    // ai
+    var ai = exp.ai.answer;
+    if (exp.ai.exact || exp.ai.form === 'fraction') return { graded: true, correct: exactForm(read, ai), flags: [] };
+    var formFlag = exp.ai.form === 'other' ? ['the page asks for a particular form; check the form'] : [];
+    var av = solve.answerValue(read), bv = solve.answerValue(ai);
+    if (av && bv && av.value && bv.value) {
+      if (solve.equal(av.value, bv.value)) {
+        // "as a decimal": the value, written as a decimal; "as a percent":
+        // the value, written with a percent sign
+        var wrongForm = (exp.ai.form === 'decimal' && /[\/%]/.test(text(read))) ||
+          (exp.ai.form === 'percent' && !/%/.test(text(read)));
+        return { graded: true, correct: !wrongForm, flags: wrongForm ? [] : formFlag };
+      }
+      var near = solve.accepts(read, { value: bv.value, tree: null });
+      return { graded: true, correct: false,
+        flags: near && near.nearMiss ? ['matches the AI answer when rounded; check whether rounding was asked for'] : [] };
+    }
+    if (equivalent(read, ai)) return { graded: true, correct: true, flags: formFlag };
+    var m = matchesAi(read, ai);
+    return { graded: true, correct: m.correct, flags: (m.flag ? [m.flag] : []).concat(m.correct ? formFlag : []) };
+  }
+
+  // Whether the two reads agree under an expectation from settle.js.
+  function readsAgreeOn(a, b, exp, ja, jb) {
+    if (ja.graded !== jb.graded || ja.correct !== jb.correct) return false;
+    if (ja.mark !== undefined || jb.mark !== undefined) return ja.mark === jb.mark;
+    if (normalize(a) === '' && normalize(b) === '') return true;
+    if (normalize(a) === '' || normalize(b) === '') return false;
+    var av = solve.answerValue(a), bv = solve.answerValue(b);
+    if (av && bv && av.value && bv.value) return solve.equal(av.value, bv.value);
+    if (av && bv && av.remainder && bv.remainder) return av.remainder.q === bv.remainder.q && av.remainder.r === bv.remainder.r;
+    if (exp.source === 'key') return readsAgree(a, b, exp.match, exp.keyAnswer);
+    return equivalent(a, b);
+  }
+
+  // opts.expected (from settle.js, one per key question) says what each
+  // question is graded against: the key, a computed value, an AI answer, or
+  // nothing. Without it every question is graded against the key, as it
+  // always was.
   function gradeSlip(opts) {
     opts = opts || {};
     var key = opts.key || { questions: [] };
@@ -1336,6 +1484,7 @@
     var review = opts.review || null;
     var lowConfidence = opts.lowConfidence === undefined ? 0.7 : opts.lowConfidence;
     var questions = Array.isArray(key.questions) ? key.questions : [];
+    var expected = Array.isArray(opts.expected) ? opts.expected : null;
     var mentioned = questionsMentioned(reading.note, questions.length);
 
     var answers = questions.map(function (question, i) {
@@ -1346,24 +1495,45 @@
       var v = review ? answerFor(review, q) : null;
       var reviewRead = review ? text(v && v.answer) : null;
       var maxPoints = pointsOf(question);
-      var match = matchOf(question);
-      var keyAnswer = question && question.answer;
-      var correct = scores(read, keyAnswer, match);
-
+      var exp = expected ? expected[i] : null;
       var reasons = [];
-      if (review && !readsAgree(read, reviewRead, match, keyAnswer)) {
-        reasons.push('reader ' + shown(read) + ', reviewer ' + shown(reviewRead));
+      var correct, graded = true, source = 'key', aiSolved = false;
+
+      if (!exp) {
+        var match = matchOf(question);
+        var keyAnswer = question && question.answer;
+        correct = scores(read, keyAnswer, match);
+        if (review && !readsAgree(read, reviewRead, match, keyAnswer)) {
+          reasons.push('reader ' + shown(read) + ', reviewer ' + shown(reviewRead));
+        }
+      } else {
+        source = exp.source;
+        var j = judge(read, exp);
+        graded = j.graded;
+        correct = j.correct;
+        aiSolved = graded && source === 'ai';
+        if (review) {
+          var jr = judge(reviewRead, exp);
+          if (!readsAgreeOn(read, reviewRead, exp, j, jr)) reasons.push('reader ' + shown(read) + ', reviewer ' + shown(reviewRead));
+        }
+        (exp.flags || []).forEach(function (f) { reasons.push(f); });
+        j.flags.forEach(function (f) { reasons.push(f); });
       }
       if (confidence < lowConfidence) reasons.push('low confidence ' + confidence.toFixed(2));
       if (mentioned[q]) reasons.push('reader note mentions it');
+      if (!graded) maxPoints = 0;
 
       return {
         q: q,
         read: read,
         reviewRead: reviewRead,
         confidence: confidence,
-        correct: correct,
-        points: correct ? maxPoints : 0,
+        correct: graded ? correct : null,
+        graded: graded,
+        source: source,
+        expected: exp ? expectedText(exp) : text(question && question.answer),
+        aiSolved: aiSolved,
+        points: graded && correct ? maxPoints : 0,
         maxPoints: maxPoints,
         flagged: reasons.length > 0,
         reason: reasons.join('; ')
@@ -1386,6 +1556,10 @@
         : 'Name: reader ' + shown(readerName));
     }
     answers.forEach(function (a) { if (a.flagged) notes.push('Q' + a.q + ': ' + a.reason); });
+    var aiList = answers.filter(function (a) { return a.aiSolved; }).map(function (a) { return 'Q' + a.q; });
+    if (aiList.length) notes.push('AI-solved, check: ' + aiList.join(', '));
+    var ungraded = answers.filter(function (a) { return !a.graded; }).map(function (a) { return 'Q' + a.q; });
+    if (ungraded.length) notes.push('Not graded: ' + ungraded.join(', '));
 
     var score = 0;
     var maxScore = 0;
@@ -1421,6 +1595,44 @@
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
+  // Whether a row's AI analysis was written against the expected answers it
+  // is graded on now. analysisBasis holds, for each question the analysis
+  // covered, its expected answer when the analysis was written ({q:
+  // expected}); a question it did not cover never makes it stale.
+  function analysisCurrent(row) {
+    return !!row && !!row.analysis && analysisChanged(row).length === 0;
+  }
+
+  // The covered questions whose expected answer has changed since the
+  // analysis was written.
+  function analysisChanged(row) {
+    var basis = row && row.analysisBasis;
+    if (!basis || typeof basis !== 'object' || Array.isArray(basis)) return [];
+    var answers = Array.isArray(row.answers) ? row.answers : [];
+    return Object.keys(basis).map(Number).filter(function (q) {
+      var a = answers[q - 1];
+      return !a || text(a.expected) !== text(basis[q]);
+    }).sort(function (a, b) { return a - b; });
+  }
+
+  // A row the teacher should look at: a read problem, an answer solved by AI,
+  // or an AI analysis that doubts the read or the expected answer. The
+  // Roster's Flags column uses the same test.
+  function rowFlagged(row) {
+    if (!row) return false;
+    if (row.flagged || row.nameFlag) return true;
+    // An analysis's doubts count while it is current: a key fixed as it asked
+    // clears them.
+    if (analysisCurrent(row) && ((row.analysisReadConcerns || []).length || (row.analysisExpectedConcerns || []).length)) return true;
+    return (row.answers || []).some(function (a) { return a && (a.flagged || a.aiSolved); });
+  }
+
+  // Rows whose every question went ungraded (maxScore 0) have no percent:
+  // they are counted in students and in notGraded, and left out of the mean,
+  // the median, the pass rate and the bands. A question's hit rate is over
+  // the rows where it was graded, and null where it was graded on none.
+  // errorPatterns counts, per pattern, the students whose current AI
+  // analysis names it (stale analyses are left out and counted).
   function summarize(rows, key, opts) {
     rows = Array.isArray(rows) ? rows : [];
     opts = opts || {};
@@ -1429,18 +1641,23 @@
     if (!isFinite(passPercent)) passPercent = 70;
     var questionCount = key && Array.isArray(key.questions) ? key.questions.length : 0;
     var n = rows.length;
+    var gradedRows = rows.filter(function (row) { return Number(row && row.maxScore) > 0; });
+    var g = gradedRows.length;
 
-    var percents = rows.map(percentOf);
-    var total = percents.reduce(function (s, p) { return s + p; }, 0);
+    var percents = gradedRows.map(percentOf);
+    var total = percents.reduce(function (sum, p) { return sum + p; }, 0);
     var passed = percents.filter(function (p) { return p + 1e-9 >= passPercent; }).length;
 
     var perQuestion = [];
     for (var q = 1; q <= questionCount; q++) {
-      var hits = rows.filter(function (row) {
+      var graded = 0, hits = 0;
+      rows.forEach(function (row) {
         var a = row && Array.isArray(row.answers) ? row.answers[q - 1] : null;
-        return !!(a && a.correct);
-      }).length;
-      perQuestion.push({ q: q, hitRate: n ? hits * 100 / n : 0 });
+        if (!a || a.graded === false) return;
+        graded++;
+        if (a.correct) hits++;
+      });
+      perQuestion.push({ q: q, hitRate: graded ? hits * 100 / graded : null, graded: graded });
     }
 
     var counts = BUCKETS.map(function () { return 0; });
@@ -1448,24 +1665,122 @@
       counts[Math.max(0, Math.min(9, Math.floor((p + 1e-9) / 10)))]++;
     });
 
+    var patterns = {}, staleAnalyses = 0, analyses = 0;
+    rows.forEach(function (row) {
+      if (!row || !row.analysis) return;
+      if (!analysisCurrent(row)) { staleAnalyses++; return; }
+      analyses++;
+      var seen = {};
+      (Array.isArray(row.errorPatterns) ? row.errorPatterns : []).forEach(function (e) {
+        if (!e || !e.pattern) return;
+        var p = patterns[e.pattern] || (patterns[e.pattern] = { pattern: e.pattern, students: 0, questions: [] });
+        if (!seen[e.pattern]) { p.students++; seen[e.pattern] = true; }
+        if (e.q && p.questions.indexOf(Number(e.q)) < 0) p.questions.push(Number(e.q));
+      });
+    });
+    var errorPatterns = Object.keys(patterns).map(function (k) { return patterns[k]; }).sort(function (a, b) {
+      return b.students - a.students || (a.pattern < b.pattern ? -1 : 1);
+    });
+    errorPatterns.forEach(function (p) { p.questions.sort(function (a, b) { return a - b; }); });
+
     return {
       students: n,
-      mean: n ? total / n : 0,
+      notGraded: n - g,
+      mean: g ? total / g : 0,
       median: median(percents.slice().sort(function (a, b) { return a - b; })),
-      passRate: n ? passed * 100 / n : 0,
+      passRate: g ? passed * 100 / g : 0,
       passPercent: passPercent,
       perQuestion: perQuestion,
       distribution: BUCKETS.map(function (b, i) { return { bucket: b, count: counts[i] }; }),
-      flaggedRows: rows.filter(function (row) { return !!(row && row.flagged); }).length,
+      flaggedRows: rows.filter(rowFlagged).length,
       singleModelRows: rows.filter(function (row) {
         return !!(row && row.reviewMode === 'single-model');
-      }).length
+      }).length,
+      errorPatterns: errorPatterns,
+      analyses: analyses,
+      staleAnalyses: staleAnalyses
     };
+  }
+
+  // ---------------------------------------------------------------- second parse
+
+  var CROSS_GLYPHS = {
+    '\u00bd': '1/2', '\u2153': '1/3', '\u2154': '2/3', '\u00bc': '1/4', '\u00be': '3/4',
+    '\u2155': '1/5', '\u2156': '2/5', '\u2157': '3/5', '\u2158': '4/5', '\u2159': '1/6',
+    '\u215a': '5/6', '\u2150': '1/7', '\u215b': '1/8', '\u215c': '3/8', '\u215d': '5/8',
+    '\u215e': '7/8', '\u2151': '1/9', '\u2152': '1/10'
+  };
+
+  // A written number from math.js's parse (a double) as an exact fraction.
+  // Every number solve.js accepts has at most 15 digits, which a double and
+  // its shortest printed form hold exactly.
+  function constantValue(v) {
+    if (typeof v !== 'number' || !isFinite(v)) return null;
+    var m = /^(\d+)(?:\.(\d+))?(?:e([+-]\d+))?$/.exec(String(v));
+    if (!m) return null;
+    var digits = m[1] + (m[2] || ''), exp = (m[3] ? Number(m[3]) : 0) - (m[2] || '').length;
+    if (Math.abs(exp) > 40) return null;
+    return exp >= 0 ? solve.frac(BigInt(digits) * BigInt(10) ** BigInt(exp))
+      : solve.frac(BigInt(digits), BigInt(10) ** BigInt(-exp));
+  }
+
+  function crossWalk(node, depth) {
+    if (depth > 40) throw new Error('deep');
+    if (node.type === 'ParenthesisNode') return crossWalk(node.content, depth + 1);
+    if (node.type === 'ConstantNode') {
+      var c = constantValue(node.value);
+      if (!c) throw new Error('constant');
+      return c;
+    }
+    if (node.type !== 'OperatorNode') throw new Error('node');
+    var args = node.args.map(function (a) { return crossWalk(a, depth + 1); });
+    switch (node.fn) {
+      case 'unaryMinus': return solve.neg(args[0]);
+      case 'unaryPlus': return args[0];
+      case 'add': return solve.add(args[0], args[1]);
+      case 'subtract': return solve.sub(args[0], args[1]);
+      case 'multiply': return solve.mul(args[0], args[1]);
+      case 'divide': return solve.div(args[0], args[1]);
+      case 'pow':
+        if (!solve.isWhole(args[1])) throw new Error('exponent');
+        return solve.pow(args[0], args[1].n);
+      default: throw new Error('operator');
+    }
+  }
+
+  // The exact value of a printed question's arithmetic by a second, separate
+  // route: math.js's parser, walked into the same exact fractions. Written
+  // numbers are read the way solve.js reads them (thousands commas, a mixed
+  // number, a fraction glyph, and a typed a/b as one number unless a / or ^
+  // is next to it), and the division sign always divides. -> {n, d} as
+  // strings, or null when math.js reads the text as anything but plain
+  // arithmetic. A computed answer is used only when this and solve.compute
+  // agree.
+  function exactValue(text) {
+    var s = solve.clean(text);
+    if (!s || s.length > MAX_PARSE) return null;
+    s = s.replace(/[\u00bd\u2153-\u215e\u00bc\u00be\u2150-\u2152]/g, function (g) { return '(' + CROSS_GLYPHS[g] + ')'; })
+      .replace(/(\d),(?=\d{3}(?!\d))/g, '$1')
+      .replace(/([\d)])\s*[xX]\s*(?=[\d.(])/g, '$1*')
+      .replace(/([\d)])\s+[xX]\s+(?=[-+][\d.(])/g, '$1*')
+      .replace(/(^|[^\d.\/^\s]\s*|^\s*)(\d+)\s+(\d+)\s*\/\s*(\d+)(?![\d.]|\s*\^)/g, '$1($2+$3/$4)')
+      .replace(/(^|[^\d.\/^])(\d+)\s*\/\s*(\d+)(?![\d.]|\s*[\^(])/g, '$1($2/$3)')
+      .replace(/\u00f7/g, '/');
+    try {
+      var v = crossWalk(math.parse(s), 0);
+      return { n: v.n.toString(), d: v.d.toString() };
+    } catch (err) {
+      return null;
+    }
   }
 
   return {
     normalize: normalize,
     equivalent: equivalent,
+    exactValue: exactValue,
+    analysisCurrent: analysisCurrent,
+    analysisChanged: analysisChanged,
+    rowFlagged: rowFlagged,
     exactForm: exactForm,
     gradeSlip: gradeSlip,
     summarize: summarize
